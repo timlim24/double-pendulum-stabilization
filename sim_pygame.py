@@ -31,7 +31,12 @@ g = 9.81         # Гравітація (м/с^2)
 I = (4.0 / 3.0) * m * (l ** 2) # Момент інерції відносно шарніра
 
 X_RAIL = 2.2     # Межа рейки від центру в один бік (повна довжина рейки = 4.4 м)
-U_MAX = 55.0     # Максимальне зусилля мотора (Ньютони)
+
+# Реалістичні обмеження приводу (як у реальних серво/крокових установках)
+A_MAX_DEFAULT = 18.0   # Максимальне прискорення візка (м/с^2) [~1.83g]
+V_MAX_DEFAULT = 3.2    # Максимальна лінійна швидкість візка (м/с)
+U_MAX_DEFAULT = (M + m) * A_MAX_DEFAULT # Максимальне номінальне зусилля мотора (Ньютони, ~19.8 Н)
+U_MAX = U_MAX_DEFAULT
 
 B_CART = 0.15    # Тертя візка об рейку (Н*с/м)
 B_PEND = 0.005   # Тертя в підшипнику маятника (Н*м*с/рад)
@@ -182,6 +187,7 @@ class RealtimeCartPoleSim:
         self.state = np.array([0.0, np.radians(INIT_THETA_DEG), 0.0, 0.0], dtype=float)
         self.motor_enabled = True
         self.last_u = 0.0
+        self.last_a = 0.0
         self.current_mode = "LQR"
         self.swing_kick_dir = 1.0
         
@@ -213,30 +219,36 @@ class RealtimeCartPoleSim:
         
         # Нижня панель UI
         panel_y = max(480, self.height - 190)
-        slider_w = min(260, int(self.width * 0.22))
+        slider_w = min(210, max(140, int(self.width * 0.17)))
         slider_h = 10
+        gap = min(35, max(15, int(self.width * 0.025)))
         
-        col1_x = 50
-        col2_x = col1_x + slider_w + 50
+        col1_x = 40
+        col2_x = col1_x + slider_w + gap
+        col3_x = col2_x + slider_w + gap
         
         # Зберігаємо попередні значення якщо слайдери вже були створені
-        v_kth = getattr(self, 'slider_kth', None).val if hasattr(self, 'slider_kth') else k_th_lqr
-        v_kom = getattr(self, 'slider_kom', None).val if hasattr(self, 'slider_kom') else k_om_lqr
-        v_kx  = getattr(self, 'slider_kx', None).val if hasattr(self, 'slider_kx') else k_x_lqr
-        v_kv  = getattr(self, 'slider_kv', None).val if hasattr(self, 'slider_kv') else k_v_lqr
+        v_kth  = getattr(self, 'slider_kth', None).val if hasattr(self, 'slider_kth') else k_th_lqr
+        v_kom  = getattr(self, 'slider_kom', None).val if hasattr(self, 'slider_kom') else k_om_lqr
+        v_kx   = getattr(self, 'slider_kx', None).val if hasattr(self, 'slider_kx') else k_x_lqr
+        v_kv   = getattr(self, 'slider_kv', None).val if hasattr(self, 'slider_kv') else k_v_lqr
+        v_amax = getattr(self, 'slider_amax', None).val if hasattr(self, 'slider_amax') else A_MAX_DEFAULT
+        v_vmax = getattr(self, 'slider_vmax', None).val if hasattr(self, 'slider_vmax') else V_MAX_DEFAULT
         
-        self.slider_kth = Slider(col1_x, panel_y + 55,  slider_w, slider_h, 0.0, 350.0, v_kth, "k_θ (кут)", color=(230, 80, 60))
-        self.slider_kom = Slider(col1_x, panel_y + 115, slider_w, slider_h, 0.0, 100.0, v_kom, "k_ω (демпфер)", color=(235, 130, 45))
-        self.slider_kx  = Slider(col2_x, panel_y + 55,  slider_w, slider_h, 0.0, 60.0,  v_kx,  "k_x (рейка)", color=(50, 150, 235))
-        self.slider_kv  = Slider(col2_x, panel_y + 115, slider_w, slider_h, 0.0, 60.0,  v_kv,  "k_v (швидкість)", color=(60, 190, 160))
+        self.slider_kth  = Slider(col1_x, panel_y + 55,  slider_w, slider_h, 0.0, 350.0, v_kth,  "k_θ (кут)", color=(230, 80, 60))
+        self.slider_kom  = Slider(col1_x, panel_y + 115, slider_w, slider_h, 0.0, 100.0, v_kom,  "k_ω (демпфер)", color=(235, 130, 45))
+        self.slider_kx   = Slider(col2_x, panel_y + 55,  slider_w, slider_h, 0.0, 60.0,  v_kx,   "k_x (рейка)", color=(50, 150, 235))
+        self.slider_kv   = Slider(col2_x, panel_y + 115, slider_w, slider_h, 0.0, 60.0,  v_kv,   "k_v (швидкість)", color=(60, 190, 160))
+        self.slider_amax = Slider(col3_x, panel_y + 55,  slider_w, slider_h, 5.0, 45.0,  v_amax, "a_max (макс a)", unit=" м/с²", color=(185, 80, 220))
+        self.slider_vmax = Slider(col3_x, panel_y + 115, slider_w, slider_h, 1.0, 6.0,   v_vmax, "v_max (макс v)", unit=" м/с", color=(215, 165, 45))
         
-        self.sliders = [self.slider_kth, self.slider_kom, self.slider_kx, self.slider_kv]
+        self.sliders = [self.slider_kth, self.slider_kom, self.slider_kx, self.slider_kv, self.slider_amax, self.slider_vmax]
         
         # Кнопки
-        btn_w = min(150, int(self.width * 0.12))
+        btn_w = min(140, max(110, int(self.width * 0.11)))
         btn_h = 40
-        btn_col1 = col2_x + slider_w + 50
-        btn_col2 = btn_col1 + btn_w + 15
+        btn_col1 = col3_x + slider_w + gap
+        btn_col2 = btn_col1 + btn_w + 12
         
         self.btn_lqr   = Button(btn_col1, panel_y + 40, btn_w, btn_h, "★ Авто LQR", (35, 95, 165), (50, 125, 210), self.set_lqr)
         self.btn_motor = Button(btn_col1, panel_y + 95, btn_w, btn_h, "Мотор: УВІМК" if self.motor_enabled else "Мотор: ВИМК",
@@ -266,6 +278,10 @@ class RealtimeCartPoleSim:
         self.slider_kom.val = k_om_lqr
         self.slider_kx.val  = k_x_lqr
         self.slider_kv.val  = k_v_lqr
+        if hasattr(self, 'slider_amax'):
+            self.slider_amax.val = A_MAX_DEFAULT
+        if hasattr(self, 'slider_vmax'):
+            self.slider_vmax.val = V_MAX_DEFAULT
 
     def toggle_motor(self):
         self.motor_enabled = not self.motor_enabled
@@ -296,6 +312,11 @@ class RealtimeCartPoleSim:
         x_val, th_val, v_val, w_val = s
         th_err = (th_val + np.pi) % (2.0 * np.pi) - np.pi
         
+        # Динамічні межі приводу від налаштувань користувача
+        a_max = self.slider_amax.val if hasattr(self, 'slider_amax') else A_MAX_DEFAULT
+        v_max = self.slider_vmax.val if hasattr(self, 'slider_vmax') else V_MAX_DEFAULT
+        u_max = (M + m) * a_max
+        
         # 1. ЗОНА ЗАХОПЛЕННЯ LQR: відхилення кута < 28° та помірна кутова швидкість
         catch_angle_rad = np.radians(28.0)
         if abs(th_err) < catch_angle_rad and abs(w_val) < 4.2:
@@ -305,7 +326,7 @@ class RealtimeCartPoleSim:
             k_vel = self.slider_kv.val
             
             u = k_th * th_err + k_om * w_val + k_pos * x_val + k_vel * v_val
-            return np.clip(u, -U_MAX, U_MAX), "LQR"
+            mode = "LQR"
         else:
             # 2. РЕЖИМ ПІДЙОМУ (SWING-UP ЗА МЕХАНІЧНОЮ ЕНЕРГІЄЮ)
             # Повна енергія відносно верхньої точки (у верхній точці E = 0, внизу E < 0)
@@ -314,7 +335,8 @@ class RealtimeCartPoleSim:
             # Якщо маятник завис нерухомо біля нижньої мертвої точки, даємо плавний стартовий імпульс
             # Фіксуємо напрямок імпульсу (latch), доки маятник не набере достатню швидкість (|w| >= 0.4 рад/с)
             if abs(th_err) > 2.2 and abs(w_val) < 0.4:
-                u_pump = 22.0 * self.swing_kick_dir
+                kick_force = min(u_max * 0.9, 24.0)
+                u_pump = kick_force * self.swing_kick_dir
             else:
                 # Оновлюємо напрямок наступного старту тільки якщо візок помітно змістився від центру
                 if abs(x_val) > 0.4:
@@ -339,7 +361,18 @@ class RealtimeCartPoleSim:
                 u_edge = 0.0
                 
             u = u_pump + u_center + u_edge
-            return np.clip(u, -U_MAX, U_MAX), "SWING-UP"
+            mode = "SWING-UP"
+            
+        # Обмеження сили мотора за максимальним прискоренням a_max
+        u = float(np.clip(u, -u_max, u_max))
+        
+        # Обмеження за максимальною лінійною швидкістю v_max (проти-ЕРС реального електродвигуна)
+        if v_val >= v_max and u > 0:
+            u = 0.0
+        elif v_val <= -v_max and u < 0:
+            u = 0.0
+            
+        return u, mode
 
     # -------------------------------------------------------------------------
     # Фізичний рушій (Нелінійна динаміка системи візок + маятник)
@@ -364,7 +397,16 @@ class RealtimeCartPoleSim:
         theta_acc = (g * sin_t - cos_t * temp - (B_PEND / (m * l)) * w_val) / denom
         x_acc = temp - (m * l * theta_acc * cos_t) / (M + m)
         
-        # Пружні гумові відбійники рейки
+        # Фізичне обмеження прискорення візка від приводу (a <= a_max)
+        a_max = self.slider_amax.val if hasattr(self, 'slider_amax') else A_MAX_DEFAULT
+        if abs(x_acc) > a_max:
+            x_acc = float(np.clip(x_acc, -a_max, a_max))
+            # Маятник відчуває реальне прискорення осі (принцип Д'Аламбера)
+            theta_acc = (g * sin_t - x_acc * cos_t - (B_PEND / (m * l)) * w_val) / (l * (4.0 / 3.0))
+            
+        self.last_a = x_acc
+        
+        # Пружні гумові відбійники рейки (зовнішня реакція стінки при виході за межі)
         if x_val >= X_RAIL:
             f_bump = -K_BUMPER * (x_val - X_RAIL) - D_BUMPER * max(0.0, v_val)
             x_acc += f_bump / M
@@ -554,8 +596,10 @@ class RealtimeCartPoleSim:
             pygame.draw.circle(self.screen, (40, 45, 55), w_pos, 3)
 
         # 3. Стрілка сили мотора (u)
+        cur_amax = self.slider_amax.val if hasattr(self, 'slider_amax') else A_MAX_DEFAULT
+        cur_umax = (M + m) * cur_amax
         if abs(self.last_u) > 0.5:
-            force_len = int((self.last_u / U_MAX) * 75)
+            force_len = int((self.last_u / max(1.0, cur_umax)) * 75)
             arrow_col = (50, 205, 100) if self.last_u > 0 else (240, 140, 40)
             y_arr = self.rail_y - 25
             pygame.draw.line(self.screen, arrow_col, (x_c_px, y_arr), (x_c_px + force_len, y_arr), 4)
@@ -594,7 +638,7 @@ class RealtimeCartPoleSim:
         title_surf = self.font_title.render("CART-POLE REALTIME SIMULATOR (60 FPS)", True, (240, 245, 255))
         self.screen.blit(title_surf, (30, 16))
         
-        hint_surf = self.font_small.render("Мишкою: тягати маятник/візок (інерція!) | Пробіл: мотор | F11: екран | D: опустити", True, (135, 150, 175))
+        hint_surf = self.font_small.render("Мишкою: тягати маятник/візок | Слайдери: K та a_max, v_max | Пробіл: мотор | D: опустити | F11: екран", True, (135, 150, 175))
         self.screen.blit(hint_surf, (30, 42))
         
         # Статус системи та режим роботи
@@ -621,10 +665,10 @@ class RealtimeCartPoleSim:
         badge_surf = self.font_title.render(status_text, True, status_col)
         self.screen.blit(badge_surf, (30, 68))
         
-        # Телеметрія: картка праворуч від центра маятника (x = origin_x + 60)
-        card_w = 265
-        card_h = 86
-        card_x = min(self.width - 390, max(520, self.origin_x + 60))
+        # Телеметрія: картка праворуч від центра маятника
+        card_w = 300
+        card_h = 100
+        card_x = min(self.width - 430, max(490, self.origin_x + 40))
         card_rect = pygame.Rect(card_x, 14, card_w, card_h)
         pygame.draw.rect(self.screen, (25, 30, 42), card_rect, border_radius=6)
         pygame.draw.rect(self.screen, (45, 54, 72), card_rect, width=1, border_radius=6)
@@ -632,16 +676,18 @@ class RealtimeCartPoleSim:
         w_deg = np.degrees(self.state[3])
         v_m = self.state[2]
         fps_val = int(self.clock.get_fps())
+        cur_amax = self.slider_amax.val if hasattr(self, 'slider_amax') else A_MAX_DEFAULT
         
         info_lines = [
             f"Кут θ: {th_deg:+5.1f}°  (ω: {w_deg:+5.1f}°/с)",
             f"Позиція x: {x_m:+5.2f} м  (v: {v_m:+5.2f} м/с)",
+            f"Прискорення a: {self.last_a:+5.1f} м/с² (макс: {cur_amax:.1f})",
             f"Сила мотора u: {self.last_u:+5.1f} Н | FPS: {fps_val}"
         ]
         
         for i, line in enumerate(info_lines):
             t_surf = self.font_main.render(line, True, (210, 225, 245))
-            self.screen.blit(t_surf, (card_x + 14, 22 + i * 22))
+            self.screen.blit(t_surf, (card_x + 14, 18 + i * 20))
 
     def _render_oscilloscope(self):
         # Віконце осцилографа в правому верхньому кутку
@@ -681,7 +727,7 @@ class RealtimeCartPoleSim:
         pygame.draw.rect(self.screen, (24, 28, 38), (30, panel_y, panel_w, panel_h), border_radius=8)
         pygame.draw.rect(self.screen, (45, 52, 70), (30, panel_y, panel_w, panel_h), width=1, border_radius=8)
         
-        panel_title = self.font_title.render("ПАРАМЕТРИ СТАБІЛІЗАЦІЇ (LQR КОНСТАНТИ)", True, (210, 225, 245))
+        panel_title = self.font_title.render("ПАРАМЕТРИ СТАБІЛІЗАЦІЇ ТА ФІЗИЧНІ ЛІМІТИ ПРИВОДУ (LQR + A_MAX / V_MAX)", True, (210, 225, 245))
         self.screen.blit(panel_title, (50, panel_y + 14))
         
         for slider in self.sliders:
