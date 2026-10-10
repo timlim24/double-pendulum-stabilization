@@ -3,3 +3,6 @@ scipy
 matplotlib
 control
 pygame-ce
+casadi
+do-mpc
+pygame-ce

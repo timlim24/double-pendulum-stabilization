@@ -18,6 +18,16 @@
 ./venv/bin/python3 sim_matlib.py
 ```
 
+### 3. Нелінійний MPC для подвійного маятника (do-mpc / CasADi / IPOPT):
+Повний розрахунок підйому (Swing-Up) та стабілізації **подвійного** маятника з DAE-моделлю та енергетичним MPC:
+```bash
+# Запуск 100 кроків симуляції та генерація GIF-анімації (anim_dip.gif):
+./venv/bin/python3 main_mpc.py
+
+# Або запуск без генерації gif (швидше):
+./venv/bin/python3 main_mpc.py --no-gif
+```
+
 ---
 
 ## 🎛 Можливості Pygame версії (`sim_pygame.py`)
