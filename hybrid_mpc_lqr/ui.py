@@ -24,22 +24,36 @@ class Button:
         color: Tuple[int, int, int],
         hover_color: Tuple[int, int, int],
         callback: Callable[[], None],
-        border_radius: int = 6
+        border_radius: int = 6,
+        on_press: Optional[Callable[[], None]] = None,
+        on_release: Optional[Callable[[], None]] = None
     ):
         self.rect = pygame.Rect(x, y, w, h)
         self.text = text
         self.color = color
         self.hover_color = hover_color
         self.callback = callback
+        self.on_press = on_press
+        self.on_release = on_release
         self.border_radius = border_radius
         self.hovered: bool = False
+        self.pressed: bool = False
 
     def handle_event(self, event: pygame.event.Event) -> bool:
         if event.type == pygame.MOUSEMOTION:
             self.hovered = self.rect.collidepoint(event.pos)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.rect.collidepoint(event.pos):
+                self.pressed = True
+                if self.on_press:
+                    self.on_press()
                 self.callback()
+                return True
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self.pressed:
+                self.pressed = False
+                if self.on_release:
+                    self.on_release()
                 return True
         return False
 

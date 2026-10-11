@@ -119,6 +119,16 @@ class DoublePendulumDynamics:
         except np.linalg.LinAlgError:
             ddot_q = np.linalg.lstsq(M, F_rhs, rcond=None)[0]
 
+        # Апаратне обмеження максимального прискорення візка на стенді (a_max)
+        a_limit = getattr(c, 'a_max', 18.0)
+        if a_limit > 0.0 and abs(ddot_q[0]) > a_limit:
+            ddot_x_clamped = float(np.clip(ddot_q[0], -a_limit, a_limit))
+            M_links = M[1:, 1:]
+            M_cross = M[1:, 0]
+            F_links = F_rhs[1:]
+            ddot_links = np.linalg.solve(M_links, F_links - M_cross * ddot_x_clamped)
+            ddot_q = np.array([ddot_x_clamped, ddot_links[0], ddot_links[1]], dtype=np.float64)
+
         return np.array([v, w1, w2, ddot_q[0], ddot_q[1], ddot_q[2]], dtype=np.float64)
 
     def step(self, u_control: float, ext_force: float = 0.0, dt: Optional[float] = None) -> np.ndarray:

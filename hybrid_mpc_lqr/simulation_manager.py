@@ -112,9 +112,29 @@ class SimulationManager:
             self.mode = ControlMode.MANUAL_OFF
             self.status_message = "Мотор вимкнено (вільне хитання)"
 
+    def apply_kick(self, direction: float, speed_step: Optional[float] = None) -> None:
+        """
+        Миттєвий ударний імпульс швидкості (Kick) для відчутного збурення візка.
+        """
+        step = speed_step if speed_step is not None else self.cfg.nudge_kick_speed
+        self.dynamics.state[3] += direction * step
+        self.status_message = f"⚡ Поштовх візка: імпульс швидкості Δv = {direction * step:+.2f} м/с"
+
     def apply_impulse(self, force_magnitude: float) -> None:
-        """Додає горизонтальний силовий імпульс на візок (від стрілок)."""
-        self.ext_force += force_magnitude
+        """
+        Комбінований поштовх:
+        1) Миттєвий ударний стрибок швидкості візка (Kick) для наочного збурення;
+        2) Додавання імпульсної сили тяги, яка діє протягом ~0.15 с.
+        """
+        sign = 1.0 if force_magnitude >= 0.0 else -1.0
+        ratio = min(2.5, abs(force_magnitude) / max(1.0, self.cfg.key_nudge_force))
+        kick = sign * ratio * self.cfg.nudge_kick_speed
+        self.apply_kick(direction=1.0, speed_step=kick)
+        self.ext_force = force_magnitude
+
+    def set_continuous_nudge(self, force: float) -> None:
+        """Задає постійну горизонтальну тягу при утриманні клавіші."""
+        self.ext_force = force
 
     def set_mouse_drag_target(self, target_x: float) -> None:
         """
@@ -219,10 +239,10 @@ class SimulationManager:
         # =====================================================================
         self.dynamics.step(u_control, ext_force=self.ext_force, dt=dt)
 
-        # Згасання разового імпульсу клавіатури
+        # Плавне згасання разового силового імпульсу (постійна часу ~0.15 с)
         if abs(self.ext_force) > 0.0 and self.mode != ControlMode.MPC_SWINGUP:
-            self.ext_force *= 0.85
-            if abs(self.ext_force) < 0.1:
+            self.ext_force *= float(np.exp(-dt / 0.15))
+            if abs(self.ext_force) < 0.2:
                 self.ext_force = 0.0
 
     def get_info(self) -> Dict[str, Any]:

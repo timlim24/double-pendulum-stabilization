@@ -67,6 +67,15 @@ class HybridDoublePendulumApp:
         # Сила поштовху клавішами
         self.nudge_force = self.cfg.key_nudge_force
 
+        # Стан утримання кнопок та клавіш поштовху
+        self.holding_key_l = False
+        self.holding_key_r = False
+        self.holding_push_l = False
+        self.holding_push_r = False
+
+        # Коефіцієнт масштабу UI (за замовчуванням 0.50 — зменшено на 50% за запитом)
+        self.ui_scale_user = 0.75
+
         # Осцилограф та прогрес-бар
         self.oscilloscope = Oscilloscope(self.width - 320, 20, 300, 130)
         self.progress_bar = ProgressBar(30, 130, 420, 16)
@@ -74,57 +83,68 @@ class HybridDoublePendulumApp:
         # Оновлення геометрії сцени та створення масштабованого UI
         self._update_layout()
 
+    def _do_kick(self, direction: float) -> None:
+        """Здійснює ударний імпульс швидкості (Kick) та імпульсну силу для відчутного збурення візка."""
+        ratio = max(0.2, min(2.5, self.nudge_force / max(1.0, self.cfg.key_nudge_force)))
+        speed = self.cfg.nudge_kick_speed * ratio
+        self.sim.apply_kick(direction=direction, speed_step=speed)
+        self.sim.set_continuous_nudge(direction * self.nudge_force)
+
     def _update_layout(self) -> None:
         """
         Динамічно оновлює шрифти, геометрію кнопок, повзунків та сцени
         пропорційно до поточного розміру вікна.
+        UI масштабується окремо та зменшено на 50% для максимального візуального простору маятника.
         """
-        # Базова роздільна здатність відліку: 1200 x 720
-        self.ui_scale = max(0.85, min(self.width / 1200.0, self.height / 720.0))
+        # Базове масштабування фізичної сцени (рейка, маятник, візок)
+        self.scene_scale = max(0.85, min(self.width / 1300.0, self.height / 780.0))
+
+        # Масштабування елементів інтерфейсу (50% від базового масштабу)
+        self.ui_scale_user = getattr(self, 'ui_scale_user', 0.50)
+        self.ui_scale = max(0.38, self.scene_scale * self.ui_scale_user)
         scale = self.ui_scale
 
-        # Адаптивні динамічні шрифти
-        self.font_title = pygame.font.SysFont("dejavusans", max(14, int(18 * scale)), bold=True)
-        self.font_badge = pygame.font.SysFont("dejavusans", max(14, int(19 * scale)), bold=True)
-        self.font_main = pygame.font.SysFont("dejavusans", max(11, int(14 * scale)))
-        self.font_small = pygame.font.SysFont("dejavusans", max(10, int(12 * scale)))
-        self.font_button = pygame.font.SysFont("dejavusans", max(11, int(14 * scale)), bold=True)
+        # Адаптивні компактні шрифти для інтерфейсу
+        self.font_title = pygame.font.SysFont("dejavusans", max(11, int(22 * scale)), bold=True)
+        self.font_badge = pygame.font.SysFont("dejavusans", max(11, int(23 * scale)), bold=True)
+        self.font_main = pygame.font.SysFont("dejavusans", max(9, int(17 * scale)))
+        self.font_small = pygame.font.SysFont("dejavusans", max(8, int(14 * scale)))
+        self.font_button = pygame.font.SysFont("dejavusans", max(9, int(16 * scale)), bold=True)
 
         self.origin_x = self.width // 2
-        self.rail_y = int(self.height * 0.40)
+        self.rail_y = int(self.height * 0.44)
 
-        # Масштаб пікселів на метр (PPM)
-        available_w = max(600, self.width - int(240 * scale))
+        # Масштаб пікселів на метр (PPM) для фізичної сцени
+        available_w = max(600, self.width - int(120 * self.scene_scale))
         self.ppm = available_w / (2.0 * (self.cfg.X_rail + 0.35))
 
-        self.cart_w_px = max(70, int(0.38 * self.ppm))
-        self.cart_h_px = max(28, int(0.16 * self.ppm))
+        self.cart_w_px = max(65, int(0.38 * self.ppm))
+        self.cart_h_px = max(26, int(0.16 * self.ppm))
 
-        # Оновлення осцилографа у верхньому правому кутку
-        ow = int(320 * scale)
-        oh = int(130 * scale)
-        self.oscilloscope.rect = pygame.Rect(self.width - ow - int(25 * scale), int(20 * scale), ow, oh)
+        # Оновлення осцилографа у верхньому правому кутку (компактний)
+        ow = int(280 * scale)
+        oh = int(115 * scale)
+        self.oscilloscope.rect = pygame.Rect(self.width - ow - int(20 * scale), int(12 * scale), ow, oh)
 
         # Прогрес-бар
-        bar_w = min(int(460 * scale), int(self.width * 0.35))
-        bar_h = max(14, int(18 * scale))
-        self.progress_bar.rect = pygame.Rect(int(30 * scale), int(120 * scale), bar_w, bar_h)
+        bar_w = min(int(360 * scale), int(self.width * 0.32))
+        bar_h = max(11, int(15 * scale))
+        self.progress_bar.rect = pygame.Rect(int(24 * scale), int(106 * scale), bar_w, bar_h)
 
-        # Нижня панель керування UI
-        panel_h = int(210 * scale)
-        panel_y = self.height - panel_h - int(15 * scale)
-        panel_w = self.width - int(50 * scale)
-        panel_x = int(25 * scale)
+        # Нижня панель керування UI (компактна, на 50% менша за висотою)
+        panel_h = int(170 * scale)
+        panel_y = self.height - panel_h - int(12 * scale)
+        panel_w = self.width - int(36 * scale)
+        panel_x = int(18 * scale)
 
         self.panel_rect = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
 
         # Розміри та кроки елементів керування
-        slider_w = min(int(240 * scale), int(panel_w * 0.22))
-        slider_h = max(10, int(13 * scale))
-        row_step = int(58 * scale)
-        col_gap = int(35 * scale)
+        slider_w = min(int(220 * scale), int(panel_w * 0.22))
+        slider_h = max(7, int(10 * scale))
+        col_gap = int(24 * scale)
 
-        col1_x = panel_x + int(20 * scale)
+        col1_x = panel_x + int(18 * scale)
         col2_x = col1_x + slider_w + col_gap
         col3_x = col2_x + slider_w + col_gap
 
@@ -132,10 +152,12 @@ class HybridDoublePendulumApp:
         v_qth = getattr(self, 'slider_qth', None).val if hasattr(self, 'slider_qth') else self.cfg.q_th2
         v_qx = getattr(self, 'slider_qx', None).val if hasattr(self, 'slider_qx') else self.cfg.q_x
         v_fmax = getattr(self, 'slider_fmax', None).val if hasattr(self, 'slider_fmax') else self.cfg.F_max
+        v_amax = getattr(self, 'slider_amax', None).val if hasattr(self, 'slider_amax') else self.cfg.a_max
         v_nudge = getattr(self, 'slider_nudge', None).val if hasattr(self, 'slider_nudge') else self.nudge_force
 
-        s_y1 = panel_y + int(50 * scale)
-        s_y2 = s_y1 + row_step
+        s_y1 = panel_y + int(38 * scale)
+        s_y2 = s_y1 + int(42 * scale)
+        s_y3 = s_y2 + int(42 * scale)
 
         self.slider_qth = Slider(
             col1_x, s_y1, slider_w, slider_h, 100.0, 1800.0, v_qth,
@@ -147,74 +169,96 @@ class HybridDoublePendulumApp:
             "LQR Q_x (центрування візка)", color=(50, 150, 235),
             on_change=lambda val: self.sim.lqr.update_gains(q_pos=val)
         )
+        self.slider_nudge = Slider(
+            col1_x, s_y3, slider_w, slider_h, 5.0, 50.0, v_nudge,
+            "Поштовх (Kick & Push)", unit=" Н", color=(225, 145, 40),
+            on_change=lambda val: setattr(self, 'nudge_force', val)
+        )
+
         self.slider_fmax = Slider(
             col2_x, s_y1, slider_w, slider_h, 10.0, 60.0, v_fmax,
             "F_max (макс сила)", unit=" Н", color=(185, 80, 220),
             on_change=lambda val: setattr(self.cfg, 'F_max', val)
         )
-        self.slider_nudge = Slider(
-            col2_x, s_y2, slider_w, slider_h, 5.0, 40.0, v_nudge,
-            "Сила поштовху", unit=" Н", color=(220, 150, 40),
-            on_change=lambda val: setattr(self, 'nudge_force', val)
+        self.slider_amax = Slider(
+            col2_x, s_y2, slider_w, slider_h, 5.0, 40.0, v_amax,
+            "a_max (макс прискорення)", unit=" м/с²", color=(45, 195, 175),
+            on_change=lambda val: setattr(self.cfg, 'a_max', val)
         )
 
-        self.sliders = [self.slider_qth, self.slider_qx, self.slider_fmax, self.slider_nudge]
+        self.sliders = [
+            self.slider_qth, self.slider_qx, self.slider_nudge,
+            self.slider_fmax, self.slider_amax
+        ]
 
         # Кнопки дій
-        btn_w = min(int(180 * scale), int(panel_w * 0.155))
-        btn_h = max(36, int(46 * scale))
+        btn_w = min(int(160 * scale), int(panel_w * 0.15))
+        btn_h = max(24, int(40 * scale))
+        btn_gap = int(10 * scale)
         btn_col1 = col3_x
-        btn_col2 = btn_col1 + btn_w + int(12 * scale)
-        btn_col3 = btn_col2 + btn_w + int(12 * scale)
+        btn_col2 = btn_col1 + btn_w + btn_gap
+        btn_col3 = btn_col2 + btn_w + btn_gap
 
-        b_y1 = panel_y + int(36 * scale)
-        b_y2 = b_y1 + int(54 * scale)
+        b_y1 = panel_y + int(34 * scale)
+        b_y2 = b_y1 + int(48 * scale)
 
         self.btn_swing = Button(
             btn_col1, b_y1, btn_w, btn_h, "🚀 MPC Swing-Up",
             (30, 110, 195), (45, 140, 240), self.sim.trigger_mpc_swingup,
-            border_radius=int(7 * scale)
+            border_radius=int(6 * scale)
         )
         self.btn_zero = Button(
             btn_col1, b_y2, btn_w, btn_h, "🎯 Занулити (LQR)",
             (25, 130, 130), (35, 165, 165), self.sim.trigger_down_zero,
-            border_radius=int(7 * scale)
+            border_radius=int(6 * scale)
         )
         self.btn_motor = Button(
             btn_col2, b_y1, btn_w, btn_h, "⏻ Мотор: УВІМК",
             (40, 130, 85), (55, 165, 110), self._toggle_motor_btn,
-            border_radius=int(7 * scale)
+            border_radius=int(6 * scale)
         )
         self.btn_reset = Button(
             btn_col2, b_y2, btn_w, btn_h, "↻ Скинути (Free)",
             (105, 110, 125), (130, 135, 150), lambda: self.sim.reset(start_down=True),
-            border_radius=int(7 * scale)
-        )
-        
-        half_w = (btn_w - int(8 * scale)) // 2
-        self.btn_push_l = Button(
-            btn_col3, b_y1, half_w, btn_h, "◄ Вліво",
-            (145, 80, 50), (180, 105, 65), lambda: self.sim.apply_impulse(-self.nudge_force),
-            border_radius=int(7 * scale)
-        )
-        self.btn_push_r = Button(
-            btn_col3 + half_w + int(8 * scale), b_y1, half_w, btn_h, "Вправо ►",
-            (145, 80, 50), (180, 105, 65), lambda: self.sim.apply_impulse(self.nudge_force),
-            border_radius=int(7 * scale)
+            border_radius=int(6 * scale)
         )
 
-        # Кнопка перемикання повного екрана у правому кутку заголовка
-        f_w = int(115 * scale)
-        f_h = int(32 * scale)
-        self.btn_fullscreen = Button(
-            self.width - f_w - int(25 * scale), int(160 * scale), f_w, f_h, "⛶ Екран",
-            (45, 55, 75), (65, 80, 105), self.toggle_fullscreen,
+        half_w = (btn_w - int(6 * scale)) // 2
+        self.btn_push_l = Button(
+            btn_col3, b_y1, half_w, btn_h, "◄ Вліво",
+            (145, 80, 50), (180, 105, 65),
+            callback=lambda: self._do_kick(-1.0),
+            on_press=lambda: setattr(self, 'holding_push_l', True),
+            on_release=lambda: setattr(self, 'holding_push_l', False),
             border_radius=int(6 * scale)
+        )
+        self.btn_push_r = Button(
+            btn_col3 + half_w + int(6 * scale), b_y1, half_w, btn_h, "Вправо ►",
+            (145, 80, 50), (180, 105, 65),
+            callback=lambda: self._do_kick(1.0),
+            on_press=lambda: setattr(self, 'holding_push_r', True),
+            on_release=lambda: setattr(self, 'holding_push_r', False),
+            border_radius=int(6 * scale)
+        )
+        self.btn_shock = Button(
+            btn_col3, b_y2, btn_w, btn_h, "⚡ Тест удару",
+            (155, 60, 60), (190, 80, 80),
+            callback=lambda: self._do_kick(1.8 if np.random.rand() > 0.5 else -1.8),
+            border_radius=int(6 * scale)
+        )
+
+        # Кнопка перемикання повного екрана під осцилографом
+        f_w = int(95 * scale)
+        f_h = int(24 * scale)
+        self.btn_fullscreen = Button(
+            self.width - f_w - int(20 * scale), self.oscilloscope.rect.bottom + int(8 * scale), f_w, f_h, "⛶ Екран",
+            (45, 55, 75), (65, 80, 105), self.toggle_fullscreen,
+            border_radius=int(5 * scale)
         )
 
         self.buttons = [
             self.btn_swing, self.btn_zero, self.btn_motor, self.btn_reset,
-            self.btn_push_l, self.btn_push_r, self.btn_fullscreen
+            self.btn_push_l, self.btn_push_r, self.btn_shock, self.btn_fullscreen
         ]
 
     def _toggle_motor_btn(self) -> None:
@@ -276,9 +320,28 @@ class HybridDoublePendulumApp:
                     elif event.key == pygame.K_r:
                         self.sim.reset(start_down=True)
                     elif event.key == pygame.K_LEFT:
-                        self.sim.apply_impulse(-self.nudge_force)
+                        self._do_kick(-1.0)
+                        self.holding_key_l = True
                     elif event.key == pygame.K_RIGHT:
-                        self.sim.apply_impulse(self.nudge_force)
+                        self._do_kick(1.0)
+                        self.holding_key_r = True
+                    elif event.key == pygame.K_LEFTBRACKET:
+                        self.ui_scale_user = max(0.25, self.ui_scale_user - 0.05)
+                        self._update_layout()
+                    elif event.key == pygame.K_RIGHTBRACKET:
+                        self.ui_scale_user = min(1.20, self.ui_scale_user + 0.05)
+                        self._update_layout()
+                    elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                        self.ui_scale_user = max(0.25, self.ui_scale_user - 0.05)
+                        self._update_layout()
+                    elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                        self.ui_scale_user = min(1.20, self.ui_scale_user + 0.05)
+                        self._update_layout()
+                elif event.type == pygame.KEYUP:
+                    if event.key == pygame.K_LEFT:
+                        self.holding_key_l = False
+                    elif event.key == pygame.K_RIGHT:
+                        self.holding_key_r = False
 
                 # Події елементів UI
                 ui_consumed = False
@@ -293,9 +356,18 @@ class HybridDoublePendulumApp:
                 if not ui_consumed:
                     self._handle_mouse_interaction(event)
 
-            # 2. ФІЗИЧНЕ ПЕРЕТЯГУВАННЯ ВІЗКА КУРСОРОМ
+            # 2. ФІЗИЧНЕ ПЕРЕТЯГУВАННЯ ВІЗКА КУРСОРОМ ТА УТРИМАННЯ ТЯГИ
             if self.dragging_cart:
                 self.sim.set_mouse_drag_target(self.mouse_target_x)
+
+            # Безперервна тяга при затисканні стрілок клавіатури або кнопок миші
+            cont_force = 0.0
+            if self.holding_key_l or self.holding_push_l:
+                cont_force -= self.nudge_force
+            if self.holding_key_r or self.holding_push_r:
+                cont_force += self.nudge_force
+            if cont_force != 0.0:
+                self.sim.set_continuous_nudge(cont_force)
 
             # 3. ФІЗИЧНИЙ КРОК (СУБ-ІНТЕГРУВАННЯ RK4)
             sub_steps = 8
@@ -333,7 +405,7 @@ class HybridDoublePendulumApp:
             if cart_rect.collidepoint(mx, my):
                 self.dragging_cart = True
                 self.mouse_target_x = (mx - self.origin_x) / self.ppm
-            elif math.hypot(mx - p2[0], my - p2[1]) < max(20, int(26 * self.ui_scale)):
+            elif math.hypot(mx - p2[0], my - p2[1]) < max(20, int(26 * self.scene_scale)):
                 self.dragging_bob = True
                 # Якщо тягнемо маятник руками, скидаємо режим розгону MPC
                 if self.sim.mode == ControlMode.MPC_SWINGUP:
@@ -379,8 +451,8 @@ class HybridDoublePendulumApp:
         self._render_controls()
 
     def _render_rail(self) -> None:
-        """Відмальовує напрямну рейку та відбійники з урахуванням масштабу."""
-        scale = self.ui_scale
+        """Відмальовує напрямну рейку та відбійники з урахуванням масштабу сцени."""
+        scale = self.scene_scale
         rail_start_x = int(self.origin_x - (self.cfg.X_rail + 0.25) * self.ppm)
         rail_end_x = int(self.origin_x + (self.cfg.X_rail + 0.25) * self.ppm)
 
@@ -410,7 +482,7 @@ class HybridDoublePendulumApp:
 
     def _render_cart(self) -> None:
         """Відмальовує візок та колеса."""
-        scale = self.ui_scale
+        scale = self.scene_scale
         x_c_px = int(self.origin_x + self.sim.dynamics.state[0] * self.ppm)
         cart_rect = pygame.Rect(
             x_c_px - self.cart_w_px // 2,
@@ -440,7 +512,7 @@ class HybridDoublePendulumApp:
 
     def _render_pendulum(self) -> None:
         """Відмальовує ланки подвійного маятника з пропорційними товщинами."""
-        scale = self.ui_scale
+        scale = self.scene_scale
         cart_pt, joint_pt, tip_pt = self.sim.dynamics.get_cartesian_points()
 
         # Екранні координати (Y спрямований вниз)
@@ -475,7 +547,7 @@ class HybridDoublePendulumApp:
 
     def _render_force_vector(self) -> None:
         """Малює вектор сили мотора, прикладеної до візка."""
-        scale = self.ui_scale
+        scale = self.scene_scale
         u_val = self.sim.dynamics.last_u
         if abs(u_val) > 0.4:
             x_c_px = int(self.origin_x + self.sim.dynamics.state[0] * self.ppm)
@@ -497,10 +569,10 @@ class HybridDoublePendulumApp:
     def _render_hud(self) -> None:
         """Відображає адаптивні заголовок, статус, підказки та телеметрію."""
         scale = self.ui_scale
-        pad_x = int(30 * scale)
+        pad_x = int(24 * scale)
 
         title = self.font_title.render("DOUBLE INVERTED PENDULUM: HYBRID MPC + LQR", True, (240, 245, 255))
-        self.screen.blit(title, (pad_x, int(15 * scale)))
+        self.screen.blit(title, (pad_x, int(12 * scale)))
 
         # Статусний бейдж
         mode = self.sim.mode
@@ -523,59 +595,59 @@ class HybridDoublePendulumApp:
             col = (60, 240, 150)
 
         badge = self.font_badge.render(status_text, True, col)
-        self.screen.blit(badge, (pad_x, int(45 * scale)))
+        self.screen.blit(badge, (pad_x, int(34 * scale)))
 
         msg = self.font_main.render(self.sim.status_message, True, (205, 220, 240))
-        self.screen.blit(msg, (pad_x, int(75 * scale)))
+        self.screen.blit(msg, (pad_x, int(56 * scale)))
 
         hints = self.font_small.render(
-            "Мишка: тягнути візок | Пробіл: Swing-Up (MPC) | Z: Занулити (Down-LQR) | Стрілки ◄ ►: поштовх | M: мотор | R: скинути | F11: екран",
+            "Мишка: тягнути візок | Пробіл: Swing-Up | Z: Занулити | Стрілки ◄ ►: поштовх | [ / ]: Масштаб UI (±) | M: мотор | R: скинути | F11: екран",
             True, (140, 155, 180)
         )
-        self.screen.blit(hints, (pad_x, int(100 * scale)))
+        self.screen.blit(hints, (pad_x, int(76 * scale)))
 
         # Смуга прогресу MPC під час маневру
         if self.sim.mode == ControlMode.MPC_SWINGUP:
-            self.progress_bar.draw(self.screen, self.font_main, self.sim.mpc.get_progress())
+            self.progress_bar.draw(self.screen, self.font_small, self.sim.mpc.get_progress())
 
         # Осцилограф
         self.oscilloscope.draw(self.screen, self.font_small)
 
-        # Картка телеметрії
-        telem = self.sim.get_info()
-        card_w = int(320 * scale)
-        card_h = int(120 * scale)
-        card_x = self.oscilloscope.rect.x - card_w - int(20 * scale)
+        # Картка телеметрії (компактна)
+        card_w = int(280 * scale)
+        card_h = int(115 * scale)
+        card_x = self.oscilloscope.rect.x - card_w - int(14 * scale)
         card_y = self.oscilloscope.rect.y
 
         card_rect = pygame.Rect(card_x, card_y, card_w, card_h)
-        pygame.draw.rect(self.screen, (22, 27, 38), card_rect, border_radius=8)
-        pygame.draw.rect(self.screen, (45, 55, 75), card_rect, width=1, border_radius=8)
+        pygame.draw.rect(self.screen, (22, 27, 38), card_rect, border_radius=6)
+        pygame.draw.rect(self.screen, (45, 55, 75), card_rect, width=1, border_radius=6)
 
         fps = int(self.clock.get_fps())
         lines = [
             f"Кут θ1: {telem['theta1_deg']:+5.1f}° | θ2: {telem['theta2_deg']:+5.1f}°",
             f"Швидкість ω1: {telem['omega1_deg_s']:+5.1f}°/с | ω2: {telem['omega2_deg_s']:+5.1f}°/с",
             f"Позиція x: {telem['x']:+5.2f} м | v: {telem['v']:+5.2f} м/с",
+            f"Прискорення a: {telem['a']:+5.1f} м/с² (a_max: {self.cfg.a_max:.0f})",
             f"Сила мотора u: {telem['u']:+5.1f} Н | FPS: {fps}"
         ]
 
-        spacing_y = int(24 * scale)
+        spacing_y = int(20 * scale)
         for i, line in enumerate(lines):
-            t_surf = self.font_main.render(line, True, (215, 225, 245))
-            self.screen.blit(t_surf, (card_x + int(14 * scale), card_y + int(12 * scale) + i * spacing_y))
+            t_surf = self.font_small.render(line, True, (215, 225, 245))
+            self.screen.blit(t_surf, (card_x + int(10 * scale), card_y + int(8 * scale) + i * spacing_y))
 
     def _render_controls(self) -> None:
-        """Відмальовує адаптивну нижню панель інтерактивних контролів."""
+        """Відмальовує компактну нижню панель інтерактивних контролів."""
         scale = self.ui_scale
-        pygame.draw.rect(self.screen, (22, 26, 36), self.panel_rect, border_radius=int(10 * scale))
-        pygame.draw.rect(self.screen, (45, 54, 75), self.panel_rect, width=1, border_radius=int(10 * scale))
+        pygame.draw.rect(self.screen, (22, 26, 36), self.panel_rect, border_radius=int(8 * scale))
+        pygame.draw.rect(self.screen, (45, 54, 75), self.panel_rect, width=1, border_radius=int(8 * scale))
 
-        panel_title = self.font_title.render("КЕРУВАННЯ ТА ПАРАМЕТРИ СТАБІЛІЗАЦІЇ", True, (210, 225, 245))
-        self.screen.blit(panel_title, (self.panel_rect.x + int(20 * scale), self.panel_rect.y + int(12 * scale)))
+        panel_title = self.font_main.render("КЕРУВАННЯ ТА ПАРАМЕТРИ СТАБІЛІЗАЦІЇ", True, (210, 225, 245))
+        self.screen.blit(panel_title, (self.panel_rect.x + int(16 * scale), self.panel_rect.y + int(8 * scale)))
 
         for sld in self.sliders:
-            sld.draw(self.screen, self.font_main)
+            sld.draw(self.screen, self.font_small)
 
         for btn in self.buttons:
             btn.draw(self.screen, self.font_button)
