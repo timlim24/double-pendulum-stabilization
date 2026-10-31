@@ -1,10 +1,26 @@
 """
 single_pendulum package
 =======================
-Симуляція та керування одинарним перевернутим маятником на візку (LQR + MPC Swing-Up).
+Модуль симуляції та керування одинарним перевернутим маятником на візку (Single Inverted Pendulum).
 """
 
-from .config import SinglePendulumConfig, DEFAULT_CONFIG
-from .lqr_controller import SinglePendulumLQR
-from .mpc_controller import SinglePendulumMPCController
-from .mpc_generator import generate_single_pendulum_trajectory
+from .config import DEFAULT_CONFIG, SinglePendulumConfig
+from .down_lqr_controller import DownLQRController
+from .dynamics import SinglePendulumDynamics, wrap_to_pi
+from .lqr_controller import LQRController
+from .main import SinglePendulumApp
+from .mpc_controller import MPCTrajectoryController
+from .simulation_manager import ControlMode, SimulationManager
+
+__all__ = [
+    "SinglePendulumConfig",
+    "DEFAULT_CONFIG",
+    "SinglePendulumDynamics",
+    "wrap_to_pi",
+    "LQRController",
+    "DownLQRController",
+    "MPCTrajectoryController",
+    "SimulationManager",
+    "ControlMode",
+    "SinglePendulumApp",
+]
