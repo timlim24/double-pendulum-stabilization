@@ -1,266 +1,243 @@
 """
 mpc_generator.py
 ================
-Генератор оптимальної траєкторії підйому (Swing-Up) одинарного перевернутого маятника
-через пряму колокацію / нелінійну оптимізацію CasADi + IPOPT.
+Офлайн-оптимізація траєкторії підйому (Swing-Up) одинарного маятника
+(CasADi + IPOPT) + розрахунок часозмінного LQR (TVLQR) для замкненого
+відстеження траєкторії на залізі.
 
-Враховує суворі фізичні параметри та обмеження реального стенду:
-- Маса візка M = 0.130 кг, маса маятника m = 0.148 кг
-- Довжина стержня L = 0.35 м, центр мас l = 0.300 м, інерція I = 0.0147 кг*м²
-- Максимальне прискорення a_max = 7.50 м/с²
-- Максимальна швидкість v_max = 0.70 м/с
-- Межа ходу рейки |x| <= 0.18 м (18 см при доступних 27 см)
-Зберігає отриману опорну траєкторію у:
-1) 'mpc_trajectory.npz'
-2) 'esp32_cart_pole/main/mpc_trajectory_data.h' (готовий масив С для ESP32).
+Модель кінематична (кроковий візок виконує задане прискорення):
+    стан  [x, θ, v, ω, a],  керування — ривок j = da/dt
+    θ'' = ω0² sinθ + γ a cosθ − d ω − c tanh(ω/ε)      (θ від верху)
+
+Обмеження: |x| ≤ X_MAX, |v| ≤ V_MAX, |a| ≤ A_MAX, |j| ≤ J_MAX.
+Старт: висить нерухомо внизу (θ = π). Фініш: вертикально вгору, візок у центрі.
+
+Результат:
+  * single_pendulum/swingup_trajectory.npz
+  * common/swingup_trajectory.h (масив для ESP32 / C-ядра: опорний стан,
+    прямий зв'язок a_ref і коефіцієнти TVLQR K(t))
+
+На стенді закон керування:  a = a_ref(t) − K(t) · (s − s_ref(t)).
 """
 
+import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
-# Налаштування каталогу кешу matplotlib
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 try:
     import casadi as ca
-
-    try:
-        ca.GlobalOptions.setNumpyMode(-1)
-    except Exception:
-        pass
-except ImportError:
+except ImportError:  # pragma: no cover
     ca = None
 
 try:
-    from .config import DEFAULT_CONFIG, SinglePendulumConfig
+    from .hwconfig import COMMON_DIR, HW
+    from .params import COULOMB_EPS, PendulumParams, load_params, terminal_cost_4state
 except ImportError:
-    from config import DEFAULT_CONFIG, SinglePendulumConfig
+    from hwconfig import COMMON_DIR, HW
+    from params import COULOMB_EPS, PendulumParams, load_params, terminal_cost_4state
+
+HERE = Path(__file__).resolve().parent
+NPZ_PATH = HERE / "swingup_trajectory.npz"
+HEADER_PATH = COMMON_DIR / "swingup_trajectory.h"
+
+# Обмеження траєкторії (м'якші за апаратні межі, щоб був запас для зворотного зв'язку)
+T_TOTAL = 5.0
+X_MAX = 0.14
+V_MAX = 0.50
+A_MAX = 3.5
+J_MAX = 50.0
+OPT_DT = 0.02
+STORE_DT = 0.01
+
+# Ваги TVLQR [x, θ, v, ω], R
+TV_Q = np.diag([80.0, 300.0, 8.0, 30.0])
+TV_R = np.array([[0.5]])
 
 
-def export_to_c_header(
-    npz_path: Path,
-    header_path: Path,
-    time_arr: np.ndarray,
-    pos_arr: np.ndarray,
-    v_arr: np.ndarray,
-    th_arr: np.ndarray,
-    w_arr: np.ndarray,
-    dt: float,
-    total_time: float,
-):
-    """Експортує розраховану траєкторію у C-заголовок для ESP32."""
-    header_path.parent.mkdir(parents=True, exist_ok=True)
-    n_points = len(time_arr)
-
-    with open(header_path, "w", encoding="utf-8") as f:
-        f.write("// Auto-generated from single_pendulum/mpc_trajectory.npz\n")
-        f.write("#pragma once\n\n")
-        f.write(f"#define MPC_TRAJ_POINTS {n_points}\n")
-        f.write(f"#define MPC_TRAJ_DT {dt:.4f}f\n")
-        f.write(f"#define MPC_TRAJ_TOTAL_TIME {total_time:.2f}f\n\n")
-        f.write("typedef struct {\n")
-        f.write("    float time_s;\n")
-        f.write("    float pos_m;\n")
-        f.write("    float vel_mps;\n")
-        f.write("    float theta_rad;\n")
-        f.write("    float omega_radps;\n")
-        f.write("} mpc_point_t;\n\n")
-        f.write(f"static const mpc_point_t s_mpc_trajectory[MPC_TRAJ_POINTS] = {{\n")
-
-        for k in range(n_points):
-            f.write(
-                f"    {{ {time_arr[k]:.3f}f, {pos_arr[k]:.6f}f, {v_arr[k]:.6f}f, {th_arr[k]:.6f}f, {w_arr[k]:.6f}f }},\n"
-            )
-
-        f.write("};\n")
-    print(f"✓ C-заголовок для ESP32 збережено: {header_path}")
-
-
-def generate_single_pendulum_trajectory(
-    cfg: Optional[SinglePendulumConfig] = None,
-    output_path: Optional[Path] = None,
-    T: float = 4.2,
-    N: int = 210,
-    verbose: bool = True,
-) -> str:
-    """
-    Розраховує оптимальну траєкторію розгойдування та підйому маятника з theta=pi (низ) до theta=0 (верх).
-    """
-    if ca is None:
-        raise RuntimeError(
-            "Бібліотека casadi не встановлена. Запустіть скрипт у відповідному venv!"
-        )
-
-    if cfg is None:
-        cfg = DEFAULT_CONFIG
-
-    if output_path is None:
-        output_path = Path(__file__).resolve().parent / "mpc_trajectory.npz"
-    else:
-        output_path = Path(output_path)
-
-    header_path = (
-        Path(__file__).resolve().parent.parent
-        / "esp32_cart_pole"
-        / "main"
-        / "mpc_trajectory_data.h"
+def pendulum_acc(p: PendulumParams, th, w, a, sin=np.sin, cos=np.cos, tanh=np.tanh):
+    return (
+        p.omega0_sq * sin(th)
+        + p.gamma * a * cos(th)
+        - p.d_visc * w
+        - p.c_coul * tanh(w / COULOMB_EPS)
     )
 
-    if verbose:
-        print("=" * 70)
-        print("Генерація оптимальної траєкторії MPC Swing-Up під реальне залізо...")
-        print(
-            f"Параметри: L={cfg.L} м, l_com={cfg.l} м, I={cfg.I:.4f} кг*м^2, M={cfg.M} кг, m={cfg.m} кг"
-        )
-        print(
-            f"Обмеження: a_max={cfg.a_max} м/с², v_max={cfg.v_max} м/с, x_rail={cfg.x_rail} м"
-        )
-        print(f"Тертя: b_cart={cfg.b_cart} Н*с/м, b_pend={cfg.b_pend} Н*м*с/рад")
-        print("=" * 70)
 
+def optimize(p: PendulumParams, T=T_TOTAL, verbose=True):
+    if ca is None:
+        raise RuntimeError("casadi не встановлено: pip install casadi")
+    N = int(round(T / OPT_DT))
     dt = T / N
     opti = ca.Opti()
+    X = opti.variable(5, N + 1)  # x, θ, v, ω, a
+    U = opti.variable(1, N)  # ривок
 
-    # Змінні стану: X = [x, theta, v, omega]
-    X = opti.variable(4, N + 1)
-    # Змінна керування: U = сила на візок (Н)
-    U = opti.variable(1, N)
+    def f(s, j):
+        acc = pendulum_acc(p, s[1], s[3], s[4], ca.sin, ca.cos, ca.tanh)
+        return ca.vertcat(s[2], s[3], s[4], acc, j)
 
-    pos = X[0, :]
-    th = X[1, :]
-    v = X[2, :]
-    w = X[3, :]
-
-    M_val = cfg.M
-    m_val = cfg.m
-    l_val = cfg.l
-    I_val = cfg.I
-    g_val = cfg.g
-    b_c = cfg.b_cart
-    b_p = cfg.b_pend
-    v_max_val = cfg.v_max
-    a_max_val = cfg.a_max
-    x_max_val = cfg.x_rail
-
-    def f_dyn(st, u_val):
-        x_v, th_v, v_v, w_v = st[0], st[1], st[2], st[3]
-        sin_t = ca.sin(th_v)
-        cos_t = ca.cos(th_v)
-        temp = (u_val - b_c * v_v + m_val * l_val * (w_v**2) * sin_t) / (M_val + m_val)
-        denom = (I_val / (m_val * l_val)) - (m_val * l_val * (cos_t**2)) / (
-            M_val + m_val
-        )
-        theta_acc = (
-            g_val * sin_t - cos_t * temp - (b_p / (m_val * l_val)) * w_v
-        ) / denom
-        x_acc = temp - (m_val * l_val * theta_acc * cos_t) / (M_val + m_val)
-        return ca.vertcat(v_v, w_v, x_acc, theta_acc), x_acc
-
-    # Інтегрування фізики через Рунге-Кутту 4-го порядку (RK4)
-    x_acc_constraints = []
     for k in range(N):
-        st_k = X[:, k]
-        u_k = U[0, k]
-        (k1, a1) = f_dyn(st_k, u_k)
-        (k2, a2) = f_dyn(st_k + 0.5 * dt * k1, u_k)
-        (k3, a3) = f_dyn(st_k + 0.5 * dt * k2, u_k)
-        (k4, a4) = f_dyn(st_k + dt * k3, u_k)
-        st_next = st_k + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-        opti.subject_to(X[:, k + 1] == st_next)
-        x_acc_constraints.append(a1)
+        s, j = X[:, k], U[0, k]
+        k1 = f(s, j)
+        k2 = f(s + dt / 2 * k1, j)
+        k3 = f(s + dt / 2 * k2, j)
+        k4 = f(s + dt * k3, j)
+        opti.subject_to(X[:, k + 1] == s + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4))
 
-    # Початковий стан: нерухомий у нижній точці (theta = pi)
-    opti.subject_to(X[0, 0] == 0.0)
-    opti.subject_to(X[1, 0] == np.pi)
-    opti.subject_to(X[2, 0] == 0.0)
-    opti.subject_to(X[3, 0] == 0.0)
+    opti.subject_to(X[:, 0] == ca.DM([0, np.pi, 0, 0, 0]))
+    opti.subject_to(X[:, N] == ca.DM([0, 0, 0, 0, 0]))
+    opti.subject_to(opti.bounded(-X_MAX, X[0, :], X_MAX))
+    opti.subject_to(opti.bounded(-V_MAX, X[2, :], V_MAX))
+    opti.subject_to(opti.bounded(-A_MAX, X[4, :], A_MAX))
+    opti.subject_to(opti.bounded(-J_MAX, U, J_MAX))
 
-    # Кінцевий цільовий стан: строго вертикально вгору (theta = 0), візок у центрі (x = 0)
-    opti.subject_to(X[0, -1] == 0.0)
-    opti.subject_to(X[1, -1] == 0.0)
-    opti.subject_to(X[2, -1] == 0.0)
-    opti.subject_to(X[3, -1] == 0.0)
-
-    # Фізичні межі рейки, швидкості та прискорення візка
-    opti.subject_to(opti.bounded(-x_max_val, pos, x_max_val))
-    opti.subject_to(opti.bounded(-v_max_val, v, v_max_val))
-    for a_c in x_acc_constraints:
-        opti.subject_to(opti.bounded(-a_max_val, a_c, a_max_val))
-
-    # Критерій оптимізації: мінімум енергетичних зусиль + утримання візка біля центру
-    cost = (
-        ca.sumsqr(U) * 0.005 * dt + ca.sumsqr(pos) * 5.0 * dt + ca.sumsqr(v) * 0.5 * dt
-    )
+    cost = dt * (ca.sumsqr(X[4, :]) + 0.002 * ca.sumsqr(U) + 20.0 * ca.sumsqr(X[0, :]))
     opti.minimize(cost)
 
-    # Налаштування IPOPT
-    nlpsol_opts = {
-        "ipopt.print_level": 5 if verbose else 0,
-        "ipopt.sb": "no" if verbose else "yes",
-        "ipopt.max_iter": 1500,
-        "ipopt.tol": 1e-4,
-        "print_time": 0,
-    }
-    opti.solver("ipopt", nlpsol_opts)
-
-    # Початкове наближення (ініціалізація змінних)
     for k in range(N + 1):
-        opti.set_initial(th[k], np.pi * (1.0 - k / N))
-        opti.set_initial(pos[k], 0.0)
-        opti.set_initial(v[k], 0.0)
-        opti.set_initial(w[k], 0.0)
+        tt = k / N
+        opti.set_initial(X[1, k], np.pi * (1 - tt))
+        opti.set_initial(X[0, k], 0.05 * np.sin(2 * np.pi * tt * T * 0.94))
 
+    opti.solver(
+        "ipopt",
+        {
+            "ipopt.print_level": 3 if verbose else 0,
+            "print_time": 0,
+            "ipopt.sb": "yes",
+            "ipopt.max_iter": 3000,
+        },
+    )
     sol = opti.solve()
+    return dt, np.array(sol.value(X)), np.atleast_1d(sol.value(U))
 
-    time_arr = np.linspace(0.0, T, N + 1)
-    u_vals = np.append(sol.value(U), 0.0)
-    pos_vals = sol.value(pos)
-    th_vals = sol.value(th)
-    v_vals = sol.value(v)
-    w_vals = sol.value(w)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        str(output_path),
-        time=time_arr,
-        u=u_vals,
-        pos=pos_vals,
-        theta=th_vals,
-        v=v_vals,
-        omega=w_vals,
-        dt=dt,
-        total_time=T,
-        L=cfg.L,
-        a_max=cfg.a_max,
-        v_max=cfg.v_max,
-    )
+def resample_fine(p: PendulumParams, opt_dt, S, U, fine_dt):
+    """
+    Перераховує траєкторію з кроком контуру керування (ривок ZOH, RK4).
+    Кожен інтервал оптимізатора стартує з його вузла (multiple shooting), бо
+    наскрізне інтегрування біля нестійкої верхньої точки розбігається.
+    """
+    sub = int(round(opt_dt / fine_dt))
+    h = opt_dt / sub
 
-    export_to_c_header(
-        output_path, header_path, time_arr, pos_vals, v_vals, th_vals, w_vals, dt, T
-    )
+    def f(s, j):
+        return np.array([s[2], s[3], s[4], pendulum_acc(p, s[1], s[3], s[4]), j])
 
+    out = np.zeros((5, len(U) * sub + 1))
+    for k, j in enumerate(U):
+        s = S[:, k].copy()
+        for i in range(sub):
+            out[:, k * sub + i] = s
+            k1 = f(s, j)
+            k2 = f(s + h / 2 * k1, j)
+            k3 = f(s + h / 2 * k2, j)
+            k4 = f(s + h * k3, j)
+            s = s + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+    out[:, -1] = S[:, -1]
+    return out
+
+
+def tvlqr(p: PendulumParams, ref, dt):
+    """Дискретний TVLQR уздовж опорної траєкторії. Повертає K[k] (4 коеф.)."""
+    _, P = terminal_cost_4state(p, dt)
+    n = ref.shape[1]
+    K_all = np.zeros((n, 4))
+    I4 = np.eye(4)
+    for k in range(n - 1, -1, -1):
+        th, w, a = ref[1, k], ref[3, k], ref[4, k]
+        dfdth = p.omega0_sq * np.cos(th) - p.gamma * a * np.sin(th)
+        dfdw = -p.d_visc - p.c_coul / COULOMB_EPS / np.cosh(w / COULOMB_EPS) ** 2
+        Ac = np.array(
+            [[0, 0, 1, 0], [0, 0, 0, 1], [0, 0, 0, 0], [0, dfdth, 0, dfdw]], dtype=float
+        )
+        Bc = np.array([[0], [0], [1], [p.gamma * np.cos(th)]], dtype=float)
+        Ad = I4 + Ac * dt + Ac @ Ac * dt * dt / 2
+        Bd = Bc * dt + Ac @ Bc * dt * dt / 2
+        K = np.linalg.solve(TV_R + Bd.T @ P @ Bd, Bd.T @ P @ Ad)
+        P = TV_Q + Ad.T @ P @ (Ad - Bd @ K)
+        P = 0.5 * (P + P.T)
+        K_all[k] = K.ravel()
+    return K_all
+
+
+def export_header(t, ref, K, path=HEADER_PATH):
+    n = len(t)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("// АВТОГЕНЕРОВАНО single_pendulum/mpc_generator.py — НЕ РЕДАГУВАТИ\n")
+        fh.write("// Траєкторія підйому + TVLQR: a = a_ref - K·(s - s_ref), s=[x,θ,v,ω]\n")
+        fh.write("#pragma once\n\n")
+        fh.write(f"#define SWING_N {n}\n")
+        fh.write(f"#define SWING_DT {STORE_DT:.4f}f\n")
+        fh.write(f"#define SWING_T {t[-1]:.4f}f\n")
+        fh.write(f"#define SWING_X_MAX {X_MAX:.3f}f\n")
+        fh.write(f"#define SWING_V_MAX {V_MAX:.3f}f\n")
+        fh.write(f"#define SWING_A_MAX {A_MAX:.3f}f\n\n")
+        fh.write("typedef struct {\n  float x, th, v, w, a;\n  float kx, kth, kv, kw;\n} swing_point_t;\n\n")
+        fh.write("static const swing_point_t s_swing_traj[SWING_N] = {\n")
+        for i in range(n):
+            x, th, v, w, a = ref[:, i]
+            k = K[i]
+            fh.write(
+                f"  {{{x:.6f}f, {th:.6f}f, {v:.6f}f, {w:.6f}f, {a:.5f}f, "
+                f"{k[0]:.4f}f, {k[1]:.4f}f, {k[2]:.4f}f, {k[3]:.4f}f}},\n"
+            )
+        fh.write("};\n")
+
+
+def generate(p: PendulumParams = None, verbose=True, tvlqr_only=False):
+    p = p or load_params()
+    ctrl_dt = HW["CTRL_DT"]
+    if tvlqr_only:
+        fine = np.load(NPZ_PATH)["fine"]
+        return _finish(p, fine, ctrl_dt, verbose)
     if verbose:
-        print("\n" + "=" * 70)
-        print("✓ ТРАЄКТОРІЮ УСПІШНО ЗГЕНЕРОВАНО ТА ЗБЕРЕЖЕНО!")
-        print(f"Файл: {output_path}")
-        print(f"Тривалість: {T:.2f} с ({N} кроків, dt = {dt:.3f} с)")
-        print(
-            f"Макс. координата |x|: {np.max(np.abs(pos_vals)):.3f} м (межа: {x_max_val:.2f} м)"
-        )
-        print(
-            f"Макс. швидкість  |v|: {np.max(np.abs(v_vals)):.3f} м/с (межа: {v_max_val:.2f} м/с)"
-        )
-        print(
-            f"Кінцевий кут: theta = {np.degrees(th_vals[-1]):.3f}° (ідеальна вертикаль 0.0°)"
-        )
-        print("=" * 70 + "\n")
+        print("=" * 70)
+        print("Оптимізація траєкторії підйому (кінематична модель, CasADi/IPOPT)")
+        print(f"ω0={p.omega0:.3f} рад/с, γ={p.gamma:.3f}, d={p.d_visc:.3f}, c={p.c_coul:.3f}")
+        print(f"T={T_TOTAL} с, |x|≤{X_MAX} м, |v|≤{V_MAX} м/с, |a|≤{A_MAX} м/с², |j|≤{J_MAX} м/с³")
+        print("=" * 70)
+    opt_dt, S, U = optimize(p, verbose=verbose)
+    fine = resample_fine(p, opt_dt, S, U, ctrl_dt)
+    return _finish(p, fine, ctrl_dt, verbose)
 
-    return str(output_path)
+
+def _finish(p, fine, ctrl_dt, verbose):
+    K_fine = tvlqr(p, fine, ctrl_dt)
+
+    step = int(round(STORE_DT / ctrl_dt))
+    idx = np.arange(0, fine.shape[1], step)
+    t = idx * ctrl_dt
+    ref = fine[:, idx]
+    K = K_fine[idx]
+
+    np.savez_compressed(
+        NPZ_PATH, t=t, x=ref[0], theta=ref[1], v=ref[2], omega=ref[3], a=ref[4], K=K,
+        fine=fine,
+    )
+    export_header(t, ref, K)
+    if verbose:
+        end = fine[:, -1]
+        print(f"✓ {NPZ_PATH}\n✓ {HEADER_PATH}")
+        print(
+            f"max|x|={np.abs(ref[0]).max():.3f} м  max|v|={np.abs(ref[2]).max():.3f} м/с  "
+            f"max|a|={np.abs(ref[4]).max():.2f} м/с²  (крок ≤ {np.abs(ref[2]).max() * HW['STEPS_PER_METER'] / 1000:.1f} кГц)"
+        )
+        print(
+            f"кінець (ресемпл 500 Гц): θ={np.degrees(end[1]):+.2f}°, ω={end[3]:+.3f}, x={end[0]:+.4f}"
+        )
+        print(f"max|K| = {np.abs(K).max(axis=0).round(1)}")
+    return t, ref, K
 
 
 if __name__ == "__main__":
-    generate_single_pendulum_trajectory()
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--tvlqr-only", action="store_true",
+                    help="не переоптимізовувати траєкторію, лише перерахувати TVLQR")
+    generate(tvlqr_only=ap.parse_args().tvlqr_only)
+    sys.exit(0)

@@ -1,8 +1,9 @@
 numpy
 scipy
 matplotlib
-control
 pygame-ce
 casadi
+pyserial
+# лише для подвійного маятника (mpc_sim/, hybrid_mpc_lqr/)
+control
 do-mpc
-pygame-ce

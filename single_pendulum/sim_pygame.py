@@ -1,11 +1,11 @@
 """
 sim_pygame.py
 =============
-Точка входу для запуску симулятора одинарного перевернутого маятника на візку.
+Точка входу симулятора одинарного маятника (цифровий двійник стенду).
+    python single_pendulum/sim_pygame.py
 """
 
-from single_pendulum.main import SinglePendulumApp
+from main import SinglePendulumApp
 
 if __name__ == "__main__":
-    app = SinglePendulumApp()
-    app.run()
+    SinglePendulumApp().run()

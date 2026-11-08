@@ -1,245 +1,89 @@
 """
 simulation_manager.py
 =====================
-Менеджер симуляції та скінченний автомат станів (FSM) системи одинарного маятника на візку.
-Координує взаємодію між чистою фізичною динамікою, розгоном візка за MPC та стабілізатором LQR:
-  - LQR активний ЗАВЖДИ (Omnipresent Catch), щойно маятник опиняється у верхній зоні (|θ| < 20°),
-    перериваючи будь-який інший стан (гасіння, розгін, очікування).
-  - MPC подає силу виключно на візок (без телепортації стану чи кутів).
-  - Маятник рухається суто за законами нелінійної фізики RK4 (пасивний шарнір з енкодером).
+Цифровий двійник стенду: ТЕ САМЕ C-ядро керування, що працює на ESP32
+(common/controller.c), + модель стенду (common/host/plant_sim.c) з
+ідентифікованими параметрами (common/pendulum_params.json).
+
+Різниця з реальністю зводиться до точності параметрів моделі (їх дає sys_id.py),
+а не до різної логіки: стани, пороги, фільтри, LQR, траєкторія підйому,
+обмеження швидкості/прискорення — однакові.
 """
 
-from enum import Enum
-from typing import Optional
-
-import numpy as np
+import collections
+import copy
 
 try:
-    from .config import DEFAULT_CONFIG, SinglePendulumConfig
-    from .down_lqr_controller import DownLQRController
-    from .dynamics import SinglePendulumDynamics, wrap_to_pi
-    from .lqr_controller import LQRController
-    from .mpc_controller import MPCTrajectoryController
+    from . import controller_lib as cl
+    from .params import PendulumParams, load_params
 except ImportError:
-    from config import DEFAULT_CONFIG, SinglePendulumConfig
-    from down_lqr_controller import DownLQRController
-    from dynamics import SinglePendulumDynamics, wrap_to_pi
-    from lqr_controller import LQRController
-    from mpc_controller import MPCTrajectoryController
-
-
-class ControlMode(Enum):
-    FALLEN = "Вільний рух / Відкат"
-    LQR_DOWN_ZERO = "Занулення вниз (Down-LQR)"
-    WAITING_FOR_TRIGGER = "Очікує запуску MPC (Клавіша S)"
-    MPC_SWINGUP = "Розгін візка (MPC Swing-Up)"
-    LQR_BALANCE = "Балансування (LQR)"
-    MANUAL_OFF = "Мотор вимкнено"
+    import controller_lib as cl
+    from params import PendulumParams, load_params
 
 
 class SimulationManager:
-    """
-    Головний координатор гібридного керування одинарним маятником.
-    Реалізує незалежне включення LQR, чисту фізику візка і маятника та телеметрію.
-    """
+    def __init__(self, params: PendulumParams = None, x0: float = 0.08):
+        self.params = copy.deepcopy(params or load_params())
+        self.x0 = x0
+        self.events = collections.deque(maxlen=8)
+        self._time_acc = 0.0
+        self._pending_cmd = 0
+        self.reset()
 
-    def __init__(self, config: SinglePendulumConfig = DEFAULT_CONFIG):
-        self.cfg = config
-        self.dynamics = SinglePendulumDynamics(config)
-        self.lqr = LQRController(config)
-        self.down_lqr = DownLQRController(config)
-        self.mpc = MPCTrajectoryController(config)
+    # ------------------------------------------------------------------
+    def reset(self) -> None:
+        """Перезапуск "стенду": візок не в центрі, маятник висить, нове ввімкнення."""
+        gains = self.bench.ctrl.get_gains() if hasattr(self, "bench") else None
+        self.bench = cl.Bench(self.params, x0=self.x0, enc_off=1000)
+        if gains:
+            self.bench.ctrl.set_gains(gains)
+        self.events.clear()
+        self.events.append("Старт: хомінг -> центр -> гасіння коливань")
+        self._seen = 0
 
-        # Початковий режим: активне заспокоєння коливань внизу
-        self.mode = ControlMode.LQR_DOWN_ZERO
-        self.target_cart_x: float = 0.0
+    def command(self, cmd: int) -> None:
+        self._pending_cmd |= cmd
 
-        # Зовнішня сила взаємодії (миша, клавіатура)
-        self.ext_force: float = 0.0
-        self.status_message: str = "✓ Заспокоєння коливань внизу (Down-LQR)..."
+    def kick(self, d_omega: float) -> None:
+        """Поштовх маятника рукою (миттєва зміна кутової швидкості)."""
+        self.bench.plant.kick(d_omega)
+        self.events.append(f"Поштовх маятника Δω = {d_omega:+.1f} рад/с")
 
-    def reset(self, start_down: bool = True) -> None:
-        """Скидає симуляцію у початковий стан."""
-        self.mpc.stop()
-        if start_down:
-            self.dynamics.reset(
-                state=np.array([0.0, np.pi, 0.0, 0.0], dtype=np.float64)
-            )
-            self.mode = ControlMode.LQR_DOWN_ZERO
-            self.status_message = "✓ Маятник у нижньому стані. Заспокоєння коливань..."
-        else:
-            self.dynamics.reset(hanging_down=False)
-            self.mode = ControlMode.LQR_BALANCE
-            self.target_cart_x = self.dynamics.state[0]
-            self.status_message = "Вертикальна рівновага: LQR активний"
-        self.ext_force = 0.0
+    def set_model_scale(self, omega0_scale: float = 1.0) -> None:
+        """Розбіжність моделі: "справжній" маятник відрізняється від ідентифікованого."""
+        p = copy.deepcopy(self.params)
+        p.omega0_sq *= omega0_scale
+        self.bench.plant.set_params(p)
 
-    def trigger_down_zero(self) -> None:
-        """
-        Активує нижній Down-LQR алгоритм:
-        гасить залишкові коливання маятника та центрує візок точно в x = 0.
-        """
-        self.mpc.stop()
-        self.mode = ControlMode.LQR_DOWN_ZERO
-        self.status_message = (
-            "Активне занулення (Down-LQR): центрування візка в 0 та гасіння коливань..."
-        )
+    def get_gains(self):
+        return self.bench.ctrl.get_gains()
 
-    def trigger_mpc_swingup(self) -> bool:
-        """
-        Запускає подачу сили розгону візка за траєкторією MPC.
-        КРИТИЧНО: ЖОДНОЇ ТЕЛЕПОРТАЦІЇ! Поточний стан маятника та координата візка
-        залишаються рівно такими, якими вони є в момент виклику.
-        """
-        if not self.mpc.loaded:
-            self.status_message = (
-                "Помилка: файл траєкторії MPC не знайдено! Запустіть mpc_generator.py"
-            )
-            return False
+    def set_gains(self, g) -> None:
+        self.bench.ctrl.set_gains(g)
 
-        self.mpc.start()
-        self.mode = ControlMode.MPC_SWINGUP
-        self.status_message = "▶ Виконується оптимальний розгін візка MPC..."
-        return True
+    # ------------------------------------------------------------------
+    def update(self, dt_real: float) -> None:
+        """Прокручує стільки тактів 500 Гц, скільки минуло реального часу."""
+        self._time_acc += dt_real
+        n = int(self._time_acc / cl.CTRL_DT)
+        self._time_acc -= n * cl.CTRL_DT
+        for _ in range(min(n, 50)):
+            self.bench.step(self._pending_cmd)
+            self._pending_cmd = 0
+        log = self.bench.log_events
+        for t, _, text in log[self._seen:]:
+            self.events.append(f"{t:6.2f} с  {text}")
+        self._seen = len(log)
 
-    def toggle_motor(self) -> None:
-        """Вмикає або вимикає привід візка."""
-        if self.mode == ControlMode.MANUAL_OFF:
-            th_w = abs(wrap_to_pi(self.dynamics.state[1]))
-            catch_rad = np.radians(self.cfg.catch_angle_deg)
-            if th_w < catch_rad:
-                self.mode = ControlMode.LQR_BALANCE
-                self.target_cart_x = self.dynamics.state[0]
-                self.status_message = "Мотор увімкнено: LQR підхопив баланс"
-            else:
-                self.mode = ControlMode.FALLEN
-                self.status_message = "Мотор увімкнено: плавне повернення в центр"
-        else:
-            self.mpc.stop()
-            self.mode = ControlMode.MANUAL_OFF
-            self.status_message = "Мотор вимкнено (вільне хитання)"
+    # ------------------------------------------------------------------
+    @property
+    def telemetry(self) -> dict:
+        return self.bench.ctrl.telemetry()
 
-    def apply_kick(self, direction: float, speed_step: Optional[float] = None) -> None:
-        """Миттєвий ударний імпульс швидкості (Kick) для збурення візка."""
-        step = speed_step if speed_step is not None else self.cfg.nudge_kick_speed
-        self.dynamics.state[2] += direction * step
-        self.status_message = (
-            f"⚡ Поштовх візка: імпульс швидкості Δv = {direction * step:+.2f} м/с"
-        )
+    @property
+    def plant(self) -> dict:
+        return self.bench.plant.get()
 
-    def set_continuous_nudge(self, force: float) -> None:
-        """Задає постійну горизонтальну тягу при утриманні клавіші."""
-        self.ext_force = force
-
-    def set_mouse_drag_target(self, target_x: float) -> None:
-        """Розраховує пружинно-демпферну силу тяги від курсора миші на візок."""
-        cart_x = self.dynamics.state[0]
-        cart_v = self.dynamics.state[2]
-        f_spring = self.cfg.k_drag * (target_x - cart_x) - self.cfg.d_drag * cart_v
-        self.ext_force = float(f_spring)
-
-    def release_mouse_drag(self) -> None:
-        """Знімає силу перетягування мишкою."""
-        self.ext_force = 0.0
-        if self.mode == ControlMode.LQR_BALANCE:
-            self.target_cart_x = float(self.dynamics.state[0])
-
-    def update(self, dt: float) -> None:
-        """
-        Один крок симуляції та фізичної динаміки RK4.
-        """
-        # =====================================================================
-        # 1. НЕЗАЛЕЖНИЙ ОМНІПРЕЗЕНТНИЙ МОНІТОРИНГ LQR:
-        # У БУДЬ-ЯКИЙ МОМЕНТ, якщо маятник опинився біля вертикальної вершини
-        # (піднятий розгоном MPC, підкинутий мишкою чи розгойданий вручну),
-        # LQR МИТТЄВО перехоплює контроль та стабілізує систему!
-        # =====================================================================
-        catch_rad = np.radians(self.cfg.catch_angle_deg)
-        th_w = abs(wrap_to_pi(self.dynamics.state[1]))
-        w_abs = abs(self.dynamics.state[3])
-
-        is_upright = bool(th_w < catch_rad and w_abs < self.cfg.catch_max_omega)
-
-        if is_upright and self.mode != ControlMode.MANUAL_OFF:
-            if self.mode != ControlMode.LQR_BALANCE:
-                if self.mode == ControlMode.MPC_SWINGUP:
-                    self.mpc.stop()
-                self.mode = ControlMode.LQR_BALANCE
-                self.target_cart_x = self.dynamics.state[0]
-                self.status_message = (
-                    "⚡ LQR підхопив керування! Балансування активовано"
-                )
-
-        # =====================================================================
-        # 2. ВИЗНАЧЕННЯ СИЛИ МОТОРА ВІЗКА ЗА РЕЖИМОМ КЕРУВАННЯ
-        # =====================================================================
-        u_control = 0.0
-
-        if self.mode == ControlMode.LQR_BALANCE:
-            u_sat, u_raw, is_sat = self.lqr.compute_force(
-                self.dynamics.state, target_x=self.target_cart_x
-            )
-            u_control = u_sat
-
-            # Якщо збурення занадто велике і маятник вилетів із зони балансу:
-            fall_rad = np.radians(self.cfg.fall_angle_deg)
-            if th_w > fall_rad:
-                self.mode = ControlMode.FALLEN
-                self.status_message = "⚠ Маятник упав! Повернення візка в центр..."
-
-        elif self.mode == ControlMode.LQR_DOWN_ZERO:
-            u_sat, u_raw, is_sat = self.down_lqr.compute_force(
-                self.dynamics.state, target_x=0.0
-            )
-            u_control = u_sat
-
-            if self.down_lqr.is_zeroed(self.dynamics.state, target_x=0.0):
-                self.mode = ControlMode.WAITING_FOR_TRIGGER
-                self.status_message = (
-                    "✓ Нуль досягнуто! Натисніть [S] на клавіатурі або [▶ MPC Swing-Up]"
-                )
-
-        elif self.mode == ControlMode.WAITING_FOR_TRIGGER:
-            # Утримання візка в нулі (м'який PD контур на x = 0)
-            x_val = self.dynamics.state[0]
-            v_val = self.dynamics.state[2]
-            u_control = -18.0 * x_val - 6.0 * v_val
-
-            # Якщо маятник збурили ззовні — повернутися до гасіння
-            if not self.down_lqr.is_zeroed(self.dynamics.state, target_x=0.0):
-                self.mode = ControlMode.LQR_DOWN_ZERO
-                self.status_message = "Заспокоєння коливань внизу..."
-
-        elif self.mode == ControlMode.MPC_SWINGUP:
-            u_mpc, should_handover, is_finished = self.mpc.step(dt, self.dynamics.state)
-            u_control = u_mpc
-
-            if should_handover:
-                self.mode = ControlMode.LQR_BALANCE
-                self.target_cart_x = self.dynamics.state[0]
-                self.status_message = "⚡ LQR підхопив на вершині! Баланс активний"
-            elif is_finished:
-                self.mode = ControlMode.FALLEN
-                self.status_message = (
-                    "MPC завершився без виходу у верхню точку. Повернення в центр..."
-                )
-
-        elif self.mode == ControlMode.FALLEN:
-            # Плавне повернення візка в центр x = 0
-            cart_x = self.dynamics.state[0]
-            cart_v = self.dynamics.state[2]
-
-            if abs(cart_x) < 0.015 and abs(cart_v) < 0.05:
-                self.mode = ControlMode.LQR_DOWN_ZERO
-                self.status_message = "Візок у центрі. Заспокоєння коливань внизу..."
-            else:
-                # Плавна сила центрування
-                u_control = -14.0 * cart_x - 5.0 * cart_v
-
-        # =====================================================================
-        # 3. ФІЗИЧНИЙ КРОК ЧИСЛОВОГО ІНТЕГРУВАННЯ RK4
-        # =====================================================================
-        if self.mode == ControlMode.MANUAL_OFF:
-            u_control = 0.0
-
-        self.dynamics.rk4_step(dt, u_cart=u_control, ext_force=self.ext_force)
+    @property
+    def state_name(self) -> str:
+        return cl.state_name(self.telemetry["state"])

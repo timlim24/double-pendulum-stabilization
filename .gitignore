@@ -5,3 +5,6 @@ venv/
 .DS_Store
 skills/
 build/
+
+# Збірка C-ядра для симуляції
+single_pendulum/_build/

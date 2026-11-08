@@ -1,590 +1,260 @@
 """
 main.py
 =======
-Головний інтерактивний додаток стабілізації одинарного перевернутого маятника
-на візку (MPC Swing-Up + LQR) у Pygame 60 FPS.
-Повністю синхронізований з фізичним стендом:
-- Точні габарити: рейка 58.9 см, візок 4.6 см, стрижень 35 см з вантажем на 30 см.
-- Omnipresent LQR: миттєве захоплення балансу при наближенні до вершини.
-- Прорахунок та візуалізація розгону MPC перед заливкою в залізо.
+Інтерактивний симулятор стенду (Pygame). Під капотом — ТОЙ САМИЙ C-код
+керування, що прошитий в ESP32, і модель стенду з параметрами з SysID.
+Тому поведінка в симуляторі = поведінка на залізі (з точністю до моделі).
+
+Клавіші:
+  S        — підйом (працює в стані "ОЧІКУЄ 's'")
+  X/Space  — стоп (скасувати баланс/підйом)
+  H        — хомінг          C — поточне місце = центр
+  I        — SysID           R — перезапуск стенду
+  ← / →    — поштовх маятника     M — розбіжність моделі (ω0² ±5%)
+  F11      — повний екран    Esc — вихід
 """
 
 import math
-import sys
-from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pygame
 
 try:
-    from .config import DEFAULT_CONFIG, SinglePendulumConfig
-    from .dynamics import wrap_to_pi
-    from .simulation_manager import ControlMode, SimulationManager
+    from . import controller_lib as cl
+    from .hwconfig import HW
+    from .simulation_manager import SimulationManager
     from .ui import Button, Oscilloscope, ProgressBar, Slider
 except ImportError:
-    from config import DEFAULT_CONFIG, SinglePendulumConfig
-    from dynamics import wrap_to_pi
-    from simulation_manager import ControlMode, SimulationManager
+    import controller_lib as cl
+    from hwconfig import HW
+    from simulation_manager import SimulationManager
     from ui import Button, Oscilloscope, ProgressBar, Slider
+
+ROD_LEN_M = 0.35
+COM_M = 0.30
+SWING_T = None
+try:
+    SWING_T = float(np.load(__import__("pathlib").Path(__file__).with_name("swingup_trajectory.npz"))["t"][-1])
+except Exception:  # pragma: no cover
+    SWING_T = 5.0
+
+STATE_COLORS = {
+    cl.ST_BALANCING: (70, 220, 130),
+    cl.ST_SWINGUP: (190, 80, 230),
+    cl.ST_ZEROING: (70, 170, 240),
+    cl.ST_WAITING: (240, 190, 60),
+    cl.ST_SYSID: (90, 210, 220),
+}
 
 
 class SinglePendulumApp:
-    """
-    Головний клас графічного інтерфейсу Pygame для одинарного маятника.
-    """
-
-    def __init__(self, config: SinglePendulumConfig = DEFAULT_CONFIG):
-        self.cfg = config
+    def __init__(self):
         pygame.init()
-        pygame.display.set_caption(
-            "Стабілізація одинарного маятника (MPC Swing-Up + LQR) — Pygame 60 FPS"
-        )
-
-        # Визначення роздільної здатності дисплея
+        pygame.display.set_caption("Цифровий двійник стенду: одинарний маятник (прошивка ESP32 у симуляції)")
         info = pygame.display.Info()
-        screen_w, screen_h = info.current_w, info.current_h
-
-        if screen_w >= 2000:
-            self.width = min(1800, int(screen_w * 0.80))
-            self.height = min(1100, int(screen_h * 0.80))
-        elif screen_w >= 1500:
-            self.width = min(1400, int(screen_w * 0.82))
-            self.height = min(880, int(screen_h * 0.82))
-        else:
-            self.width = min(1180, max(800, screen_w - 60))
-            self.height = min(740, max(580, screen_h - 80))
-
-        self.is_fullscreen = False
-        self.screen = pygame.display.set_mode(
-            (self.width, self.height), pygame.RESIZABLE
-        )
+        self.width = min(1500, max(1000, int(info.current_w * 0.8)))
+        self.height = min(900, max(640, int(info.current_h * 0.8)))
+        self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
+        self.fullscreen = False
+        self.sim = SimulationManager()
+        self.model_scales = [1.0, 0.95, 1.05]
+        self.model_idx = 0
+        self.osc = Oscilloscope(0, 0, 300, 130)
+        self.progress = ProgressBar(30, 130, 400, 16)
+        self._layout()
 
-        # Менеджер симуляції
-        self.sim = SimulationManager(self.cfg)
+    # ------------------------------------------------------------------
+    def _layout(self):
+        s = max(0.85, min(self.width / 1300.0, self.height / 780.0))
+        self.scale = s
+        fam = "DejaVu Sans,Ubuntu,Arial"
+        self.font = pygame.font.SysFont(fam, max(13, int(15 * s)))
+        self.font_title = pygame.font.SysFont(fam, max(17, int(20 * s)), bold=True)
+        self.font_small = pygame.font.SysFont(fam, max(11, int(12 * s)))
+        self.font_mono = pygame.font.SysFont("DejaVu Sans Mono,Consolas", max(12, int(14 * s)))
 
-        # Стан взаємодії
-        self.dragging_cart = False
-        self.dragging_bob = False
-        self.mouse_target_x = 0.0
-
-        # Осцилограф та прогрес-бар
-        self.oscilloscope = Oscilloscope(self.width - 320, 20, 300, 130)
-        self.progress_bar = ProgressBar(30, 130, 400, 16)
-
-        # Оновлення геометрії
-        self._update_layout()
-
-    def _update_layout(self) -> None:
-        """Оновлює шрифти, геометрію кнопок і масштаб під поточний розмір вікна."""
-        self.scene_scale = max(0.85, min(self.width / 1300.0, self.height / 780.0))
-
-        # Шрифти
-        f_size_main = max(13, int(15 * self.scene_scale))
-        f_size_title = max(17, int(20 * self.scene_scale))
-        f_size_small = max(11, int(12 * self.scene_scale))
-
-        try:
-            self.font_main = pygame.font.SysFont(
-                "DejaVu Sans,Ubuntu,Arial,Segoe UI", f_size_main
-            )
-            self.font_title = pygame.font.SysFont(
-                "DejaVu Sans,Ubuntu,Arial,Segoe UI", f_size_title, bold=True
-            )
-            self.font_small = pygame.font.SysFont(
-                "DejaVu Sans,Ubuntu,Arial,Segoe UI", f_size_small
-            )
-            self.font_mono = pygame.font.SysFont(
-                "DejaVu Sans Mono,Consolas,Courier New", f_size_main
-            )
-        except Exception:
-            self.font_main = pygame.font.Font(None, f_size_main + 2)
-            self.font_title = pygame.font.Font(None, f_size_title + 2)
-            self.font_small = pygame.font.Font(None, f_size_small + 2)
-            self.font_mono = pygame.font.Font(None, f_size_main + 2)
-
-        # Фізичний центр рейки на екрані
+        panel_y = self.height - int(190 * s)
+        top = int(105 * s)
+        avail = panel_y - 10 - top  # місце по вертикалі для маятника вгору і вниз
         self.origin_x = self.width // 2
-        self.rail_y = int(self.height * 0.48)
+        self.rail_y = top + avail // 2
+        self.ppm = int(min(self.width * 0.55 / HW["RAIL_DISTANCE_M"], (avail / 2 - 12) / ROD_LEN_M))
+        self.osc.rect = pygame.Rect(self.width - 320, 20, 300, 130)
+        self.panel_y = panel_y
+        sw, gap = int(200 * s), int(22 * s)
+        g = self.sim.get_gains()  # [k_x, k_th, k_v, k_w, k_i]
+        old = {sl.label: sl.val for sl in getattr(self, "sliders", [])}
 
-        # Масштаб пікселів на метр (PPM):
-        # Рейка 58.9 см повинна займати комфортну частину екрана (~60% ширини)
-        self.ppm = int((self.width * 0.62) / self.cfg.rail_length_m)
-
-        # Реальні розміри візка у пікселях
-        self.cart_w_px = max(26, int(self.cfg.cart_width_m * self.ppm))
-        self.cart_h_px = max(18, int(self.cart_w_px * 0.55))
-        self.rod_len_px = int(self.cfg.L * self.ppm)
-        self.bob_com_px = int(self.cfg.l_com * self.ppm)
-
-        # Нижній пульт керування (панель кнопок і повзунків)
-        panel_y = self.height - int(195 * self.scene_scale)
-        slider_w = int(210 * self.scene_scale)
-        slider_h = 10
-        gap = int(24 * self.scene_scale)
-
-        col1_x = 30
-        col2_x = col1_x + slider_w + gap
-
-        # Отримання базових коефіцієнтів
-        k_x, k_th, k_v, k_om = self.sim.lqr.K
-
-        v_kth = (
-            getattr(self, "slider_kth", None).val
-            if hasattr(self, "slider_kth")
-            else k_th
-        )
-        v_kom = (
-            getattr(self, "slider_kom", None).val
-            if hasattr(self, "slider_kom")
-            else k_om
-        )
-        v_kx = (
-            getattr(self, "slider_kx", None).val if hasattr(self, "slider_kx") else k_x
-        )
-        v_kv = (
-            getattr(self, "slider_kv", None).val if hasattr(self, "slider_kv") else k_v
-        )
-
-        self.slider_kth = Slider(
-            col1_x,
-            panel_y + 40,
-            slider_w,
-            slider_h,
-            20.0,
-            300.0,
-            v_kth,
-            "k_θ (кутова жорсткість)",
-            color=(230, 80, 60),
-        )
-        self.slider_kom = Slider(
-            col1_x,
-            panel_y + 95,
-            slider_w,
-            slider_h,
-            2.0,
-            60.0,
-            v_kom,
-            "k_ω (кутовий демпфер)",
-            color=(235, 130, 45),
-        )
-        self.slider_kx = Slider(
-            col2_x,
-            panel_y + 40,
-            slider_w,
-            slider_h,
-            1.0,
-            60.0,
-            v_kx,
-            "k_x (центрування рейки)",
-            color=(50, 150, 235),
-        )
-        self.slider_kv = Slider(
-            col2_x,
-            panel_y + 95,
-            slider_w,
-            slider_h,
-            1.0,
-            40.0,
-            v_kv,
-            "k_v (демпфер візка)",
-            color=(60, 190, 160),
-        )
+        def mk(col, row, lo, hi, val, label, color):
+            x = 30 + col * (sw + gap)
+            return Slider(x, panel_y + 40 + row * 55, sw, 10, lo, hi, old.get(label, val), label, color=color)
 
         self.sliders = [
-            self.slider_kth,
-            self.slider_kom,
-            self.slider_kx,
-            self.slider_kv,
+            mk(0, 0, 15.0, 150.0, g[1], "K_θ (м/с² на рад)", (230, 80, 60)),
+            mk(0, 1, 2.0, 25.0, g[3], "K_ω (м/с² на рад/с)", (235, 130, 45)),
+            mk(1, 0, -60.0, 0.0, g[0], "K_x (м/с² на м)", (50, 150, 235)),
+            mk(1, 1, -40.0, 0.0, g[2], "K_v (м/с² на м/с)", (60, 190, 160)),
+        ]
+        self._gain_i = g[4]
+
+        bw, bh = int(140 * s), int(34 * s)
+        bx = 30 + 2 * (sw + gap) + 10
+
+        def btn(col, row, text, color, cb):
+            c2 = tuple(min(255, v + 30) for v in color)
+            return Button(bx + col * (bw + 10), panel_y + 22 + row * (bh + 10), bw, bh, text, color, c2, cb)
+
+        self.buttons = [
+            btn(0, 0, "▶ Підйом [S]", (45, 120, 210), lambda: self.sim.command(cl.CMD_SWINGUP)),
+            btn(1, 0, "■ Стоп [X]", (150, 50, 50), lambda: self.sim.command(cl.CMD_ABORT)),
+            btn(2, 0, "⌂ Хомінг [H]", (85, 95, 115), lambda: self.sim.command(cl.CMD_HOME)),
+            btn(0, 1, "≈ SysID [I]", (35, 125, 125), lambda: self.sim.command(cl.CMD_SYSID)),
+            btn(1, 1, "◎ Центр [C]", (35, 125, 95), lambda: self.sim.command(cl.CMD_SET_CENTER)),
+            btn(2, 1, "↻ Скинути [R]", (85, 95, 115), self.sim.reset),
+            btn(0, 2, "← поштовх", (90, 80, 140), lambda: self.sim.kick(0.8)),
+            btn(1, 2, "поштовх →", (90, 80, 140), lambda: self.sim.kick(-0.8)),
+            btn(2, 2, "Модель [M]", (110, 100, 60), self.toggle_model),
         ]
 
-        # Кнопки дій
-        btn_w = int(145 * self.scene_scale)
-        btn_h = int(36 * self.scene_scale)
-        btn_col1 = col2_x + slider_w + gap + 10
-        btn_col2 = btn_col1 + btn_w + 12
+    def toggle_model(self):
+        self.model_idx = (self.model_idx + 1) % len(self.model_scales)
+        sc = self.model_scales[self.model_idx]
+        self.sim.set_model_scale(sc)
+        self.sim.events.append(f"Розбіжність моделі: справжній ω0² ×{sc:.2f}")
 
-        self.btn_mpc = Button(
-            btn_col1,
-            panel_y + 25,
-            btn_w,
-            btn_h,
-            "▶ MPC Swing-Up [S]",
-            (45, 120, 210),
-            (65, 145, 240),
-            self.sim.trigger_mpc_swingup,
-        )
-        self.btn_zero = Button(
-            btn_col1,
-            panel_y + 75,
-            btn_w,
-            btn_h,
-            "★ Занулити (Down) [D]",
-            (35, 125, 95),
-            (50, 155, 115),
-            self.sim.trigger_down_zero,
-        )
-
-        motor_txt = (
-            "Мотор: УВІМК [Space]"
-            if self.sim.mode != ControlMode.MANUAL_OFF
-            else "Мотор: ВИМК [Space]"
-        )
-        self.btn_motor = Button(
-            btn_col2,
-            panel_y + 25,
-            btn_w,
-            btn_h,
-            motor_txt,
-            (40, 130, 85) if self.sim.mode != ControlMode.MANUAL_OFF else (150, 45, 45),
-            (55, 165, 110)
-            if self.sim.mode != ControlMode.MANUAL_OFF
-            else (190, 60, 60),
-            self.sim.toggle_motor,
-        )
-        self.btn_reset = Button(
-            btn_col2,
-            panel_y + 75,
-            btn_w,
-            btn_h,
-            "↻ Скинути [R]",
-            (85, 95, 115),
-            (110, 120, 140),
-            self.sim.reset,
-        )
-
-        self.buttons = [self.btn_mpc, self.btn_zero, self.btn_motor, self.btn_reset]
-
-        # Оновлення позиції осцилографа
-        self.oscilloscope.rect = pygame.Rect(self.width - 320, 20, 300, 130)
-
-    def toggle_fullscreen(self) -> None:
-        self.is_fullscreen = not self.is_fullscreen
-        if self.is_fullscreen:
+    def toggle_fullscreen(self):
+        self.fullscreen = not self.fullscreen
+        if self.fullscreen:
             info = pygame.display.Info()
             self.width, self.height = info.current_w, info.current_h
-            self.screen = pygame.display.set_mode(
-                (self.width, self.height), pygame.FULLSCREEN
-            )
+            self.screen = pygame.display.set_mode((self.width, self.height), pygame.FULLSCREEN)
         else:
             self.width, self.height = 1240, 760
-            self.screen = pygame.display.set_mode(
-                (self.width, self.height), pygame.RESIZABLE
-            )
-        self._update_layout()
+            self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE)
+        self._layout()
 
-    def run(self) -> None:
+    # ------------------------------------------------------------------
+    def run(self):
+        keymap = {
+            pygame.K_s: cl.CMD_SWINGUP, pygame.K_x: cl.CMD_ABORT, pygame.K_SPACE: cl.CMD_ABORT,
+            pygame.K_h: cl.CMD_HOME, pygame.K_c: cl.CMD_SET_CENTER, pygame.K_i: cl.CMD_SYSID,
+        }
         running = True
         while running:
-            dt_raw = self.clock.tick(self.cfg.fps) / 1000.0
-            dt = min(0.04, max(0.001, dt_raw))
-
-            # Передача ручних коефіцієнтів LQR якщо змінено
-            custom_g = (
-                self.slider_kth.val,
-                self.slider_kom.val,
-                self.slider_kx.val,
-                self.slider_kv.val,
-            )
-            self.sim.lqr.K = np.array(
-                [custom_g[2], custom_g[0], custom_g[3], custom_g[1]]
-            )
-
-            # Обробка подій
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
+            dt = min(0.05, self.clock.tick(60) / 1000.0)
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
                     running = False
-                elif event.type == pygame.VIDEORESIZE:
-                    self.width, self.height = event.w, event.h
-                    self.screen = pygame.display.set_mode(
-                        (self.width, self.height), pygame.RESIZABLE
-                    )
-                    self._update_layout()
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
+                elif ev.type == pygame.VIDEORESIZE and not self.fullscreen:
+                    self.width, self.height = ev.w, ev.h
+                    self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE)
+                    self._layout()
+                elif ev.type == pygame.KEYDOWN:
+                    if ev.key == pygame.K_ESCAPE:
                         running = False
-                    elif event.key in (pygame.K_F11, pygame.K_f):
+                    elif ev.key in (pygame.K_F11, pygame.K_f):
                         self.toggle_fullscreen()
-                    elif event.key in (pygame.K_s, pygame.K_RETURN):
-                        self.sim.trigger_mpc_swingup()
-                    elif event.key == pygame.K_d:
-                        self.sim.trigger_down_zero()
-                    elif event.key == pygame.K_SPACE:
-                        self.sim.toggle_motor()
-                        self.btn_motor.text = (
-                            "Мотор: УВІМК [Space]"
-                            if self.sim.mode != ControlMode.MANUAL_OFF
-                            else "Мотор: ВИМК [Space]"
-                        )
-                        self.btn_motor.color = (
-                            (40, 130, 85)
-                            if self.sim.mode != ControlMode.MANUAL_OFF
-                            else (150, 45, 45)
-                        )
-                    elif event.key == pygame.K_r:
+                    elif ev.key in keymap:
+                        self.sim.command(keymap[ev.key])
+                    elif ev.key == pygame.K_r:
                         self.sim.reset()
-                    elif event.key == pygame.K_LEFT:
-                        self.sim.apply_kick(-1.0)
-                    elif event.key == pygame.K_RIGHT:
-                        self.sim.apply_kick(1.0)
+                    elif ev.key == pygame.K_LEFT:
+                        self.sim.kick(0.8)
+                    elif ev.key == pygame.K_RIGHT:
+                        self.sim.kick(-0.8)
+                    elif ev.key == pygame.K_m:
+                        self.toggle_model()
+                for b in self.buttons:
+                    b.handle_event(ev)
+                for sl in self.sliders:
+                    sl.handle_event(ev)
 
-                # Події UI
-                for btn in self.buttons:
-                    btn.handle_event(event)
-                for sld in self.sliders:
-                    sld.handle_event(event)
+            kth, kw, kx, kv = (sl.val for sl in self.sliders)
+            self.sim.set_gains([kx, kth, kv, kw, self._gain_i])
+            self.sim.update(dt)
 
-                # Взаємодія мишкою з візком
-                x_c_px = int(self.origin_x + self.sim.dynamics.state[0] * self.ppm)
-                cart_rect = pygame.Rect(
-                    x_c_px - self.cart_w_px // 2,
-                    self.rail_y - self.cart_h_px // 2,
-                    self.cart_w_px,
-                    self.cart_h_px,
-                )
-
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if cart_rect.collidepoint(event.pos):
-                        self.dragging_cart = True
-                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                    if self.dragging_cart:
-                        self.dragging_cart = False
-                        self.sim.release_mouse_drag()
-                elif event.type == pygame.MOUSEMOTION and self.dragging_cart:
-                    target_m = (event.pos[0] - self.origin_x) / float(self.ppm)
-                    self.sim.set_mouse_drag_target(target_m)
-
-            # Оновлення фізики (кілька субстепів для стабільності RK4)
-            substeps = 4
-            sub_dt = dt / float(substeps)
-            for _ in range(substeps):
-                self.sim.update(sub_dt)
-
-            # Оновлення осцилографа
-            th_deg = wrap_to_pi(self.sim.dynamics.state[1]) * 180.0 / math.pi
-            cart_cm = self.sim.dynamics.state[0] * 100.0
-            self.oscilloscope.push(th_deg, cart_cm)
-
-            # Рендеринг сцени
-            self._render()
+            tel = self.sim.telemetry
+            # Осцилограф: відхилення від найближчої вертикалі (без стрибків ±180° унизу)
+            dev = tel["theta"] if abs(tel["theta"]) < math.pi / 2 else tel["phi"]
+            self.osc.push(math.degrees(dev), tel["x"] * 100.0)
+            self._render(tel, self.sim.plant)
             pygame.display.flip()
-
         pygame.quit()
 
-    def _render(self) -> None:
-        self.screen.fill((16, 20, 28))
+    # ------------------------------------------------------------------
+    def _render(self, tel, plant):
+        scr = self.screen
+        scr.fill((16, 20, 28))
+        scr.blit(self.font_title.render("ЦИФРОВИЙ ДВІЙНИК СТЕНДУ — ОДИНАРНИЙ МАЯТНИК", True, (240, 245, 255)), (30, 20))
+        col = STATE_COLORS.get(tel["state"], (200, 200, 200))
+        scr.blit(self.font.render(f"Стан: {self.sim.state_name}", True, col), (30, 52))
+        p = self.sim.params
+        model_txt = f"Модель: ω0={p.omega0:.3f} рад/с, κ={p.kappa:.2f}, d={p.d_visc:.3f}, c={p.c_coul:.3f}, τ={p.tau_act * 1000:.1f} мс"
+        if self.model_scales[self.model_idx] != 1.0:
+            model_txt += f"   | справжній ω0² ×{self.model_scales[self.model_idx]:.2f}"
+        scr.blit(self.font_small.render(model_txt, True, (150, 165, 190)), (30, 80))
+        if tel["state"] == cl.ST_SWINGUP:
+            self.progress.draw(scr, min(1.0, tel["swing_t"] / SWING_T), self.font_small, "Підйом")
 
-        # 1. Заголовок і статус
-        title_surf = self.font_title.render(
-            "СТАБІЛІЗАЦІЯ ОДИНАРНОГО ПЕРЕВЕРНУТОГО МАЯТНИКА", True, (240, 245, 255)
-        )
-        self.screen.blit(title_surf, (30, 20))
+        # Рейка, стопери, межі
+        ppm, oy, ox = self.ppm, self.rail_y, self.origin_x
+        lim = HW["RAIL_CENTER_M"]
+        l_px, r_px = int(ox - lim * ppm), int(ox + lim * ppm)
+        pygame.draw.line(scr, (40, 48, 65), (l_px - 20, oy), (r_px + 20, oy), 10)
+        pygame.draw.line(scr, (95, 110, 140), (l_px - 20, oy - 2), (r_px + 20, oy - 2), 2)
+        for px in (l_px - 14, r_px):
+            pygame.draw.rect(scr, (220, 50, 60), (px, oy - 24, 14, 48), border_radius=3)
+        for xm, c in ((HW["X_SOFT_LIMIT_M"], (200, 90, 60)), (HW["X_DOWN_LIMIT_M"], (60, 120, 200))):
+            for sgn in (-1, 1):
+                px = int(ox + sgn * xm * ppm)
+                pygame.draw.line(scr, c, (px, oy - 12), (px, oy + 12), 2)
+        pygame.draw.line(scr, (60, 75, 100), (ox, oy - 8), (ox, oy + 8), 2)
 
-        mode_col = (
-            (70, 220, 130)
-            if self.sim.mode == ControlMode.LQR_BALANCE
-            else (190, 80, 230)
-            if self.sim.mode == ControlMode.MPC_SWINGUP
-            else (70, 170, 240)
-            if self.sim.mode == ControlMode.LQR_DOWN_ZERO
-            else (240, 190, 60)
-            if self.sim.mode == ControlMode.WAITING_FOR_TRIGGER
-            else (200, 70, 70)
-        )
-        mode_surf = self.font_main.render(
-            f"Режим: {self.sim.mode.value}", True, mode_col
-        )
-        self.screen.blit(mode_surf, (30, 52))
+        # Візок (справжнє положення) та оцінка контролера (тонка рамка)
+        cw, ch = max(26, int(HW["CART_WIDTH_M"] * ppm)), max(18, int(HW["CART_WIDTH_M"] * ppm * 0.55))
+        cx = int(ox + plant["x"] * ppm)
+        pygame.draw.rect(scr, (45, 95, 160), (cx - cw // 2, oy - ch // 2, cw, ch), border_radius=4)
+        ex = int(ox + tel["x"] * ppm)
+        pygame.draw.rect(scr, (200, 220, 255), (ex - cw // 2, oy - ch // 2, cw, ch), 1, border_radius=4)
 
-        stat_surf = self.font_small.render(
-            self.sim.status_message, True, (170, 185, 205)
-        )
-        self.screen.blit(stat_surf, (30, 80))
+        # Маятник. Конвенція стенду: θ (від верху) > 0 — вантаж у бік −X.
+        th = plant["phi"] + math.pi
+        rod = int(ROD_LEN_M * ppm)
+        com = int(COM_M * ppm)
+        end = (int(cx - rod * math.sin(th)), int(oy - rod * math.cos(th)))
+        bob = (int(cx - com * math.sin(th)), int(oy - com * math.cos(th)))
+        pygame.draw.line(scr, (200, 215, 235), (cx, oy), end, 4)
+        r = max(9, int(13 * self.scale))
+        pygame.draw.circle(scr, (230, 140, 40), bob, r)
+        pygame.draw.circle(scr, (255, 190, 100), bob, r - 2)
+        pygame.draw.circle(scr, (30, 35, 45), (cx, oy), 6)
 
-        # 2. Індикатор прогресу MPC
-        if (
-            self.sim.mode == ControlMode.MPC_SWINGUP
-            and self.sim.mpc.loaded
-            and self.sim.mpc.duration > 0
-        ):
-            prog = self.sim.mpc.playback_time / self.sim.mpc.duration
-            self.progress_bar.draw(self.screen, prog, self.font_small, "Прогрес MPC")
-
-        # 3. Рейка стенду
-        x_lim = self.cfg.x_limit_physical  # 0.2945 м
-        rail_start_px = int(self.origin_x - x_lim * self.ppm)
-        rail_end_px = int(self.origin_x + x_lim * self.ppm)
-
-        # Металева рейка
-        pygame.draw.line(
-            self.screen,
-            (40, 48, 65),
-            (rail_start_px - 20, self.rail_y),
-            (rail_end_px + 20, self.rail_y),
-            10,
-        )
-        pygame.draw.line(
-            self.screen,
-            (95, 110, 140),
-            (rail_start_px - 20, self.rail_y - 2),
-            (rail_end_px + 20, self.rail_y - 2),
-            2,
-        )
-
-        # Фізичні кінцеві стопери (червоні)
-        pygame.draw.rect(
-            self.screen,
-            (220, 50, 60),
-            (rail_start_px - 14, self.rail_y - 24, 14, 48),
-            border_radius=3,
-        )
-        pygame.draw.rect(
-            self.screen,
-            (220, 50, 60),
-            (rail_end_px, self.rail_y - 24, 14, 48),
-            border_radius=3,
-        )
-
-        # Безпечна зона Swing-Up (±19 см)
-        safe_x = self.cfg.x_rail
-        safe_l_px = int(self.origin_x - safe_x * self.ppm)
-        safe_r_px = int(self.origin_x + safe_x * self.ppm)
-        pygame.draw.line(
-            self.screen,
-            (200, 160, 40),
-            (safe_l_px, self.rail_y - 12),
-            (safe_l_px, self.rail_y + 12),
-            2,
-        )
-        pygame.draw.line(
-            self.screen,
-            (200, 160, 40),
-            (safe_r_px, self.rail_y - 12),
-            (safe_r_px, self.rail_y + 12),
-            2,
-        )
-
-        # Мітка центру 0.00 м
-        pygame.draw.line(
-            self.screen,
-            (60, 75, 100),
-            (self.origin_x, self.rail_y - 8),
-            (self.origin_x, self.rail_y + 8),
-            2,
-        )
-        lbl_center = self.font_small.render("0.0 см (Центр)", True, (110, 125, 150))
-        self.screen.blit(
-            lbl_center, (self.origin_x - lbl_center.get_width() // 2, self.rail_y + 16)
-        )
-
-        # 4. Візок (вагонетка) з реальними пропорціями (4.6 см)
-        cart_x = self.sim.dynamics.state[0]
-        cart_v = self.sim.dynamics.state[2]
-        x_c_px = int(self.origin_x + cart_x * self.ppm)
-
-        cart_rect = pygame.Rect(
-            x_c_px - self.cart_w_px // 2,
-            self.rail_y - self.cart_h_px // 2,
-            self.cart_w_px,
-            self.cart_h_px,
-        )
-        cart_col = (70, 130, 210) if self.dragging_cart else (45, 95, 160)
-        pygame.draw.rect(self.screen, cart_col, cart_rect, border_radius=4)
-        pygame.draw.rect(
-            self.screen, (140, 185, 240), cart_rect, width=2, border_radius=4
-        )
-
-        # Колеса візка
-        wheel_r = max(4, int(self.cart_h_px * 0.35))
-        w_off = int(self.cart_w_px * 0.28)
-        for wx in [x_c_px - w_off, x_c_px + w_off]:
-            pygame.draw.circle(
-                self.screen,
-                (25, 30, 40),
-                (wx, self.rail_y + self.cart_h_px // 2),
-                wheel_r,
-            )
-            pygame.draw.circle(
-                self.screen,
-                (130, 145, 165),
-                (wx, self.rail_y + self.cart_h_px // 2),
-                wheel_r - 2,
-            )
-
-        # 5. Маятник (стрижень 35 см з круглим вантажем COM на 30 см)
-        th = self.sim.dynamics.state[1]
-        w_speed = self.sim.dynamics.state[3]
-
-        # Вісь шарніра на візку
-        pivot_px = (x_c_px, self.rail_y)
-
-        # Координати кінця стрижня та центру мас вантажу
-        end_x = int(x_c_px + self.rod_len_px * math.sin(th))
-        end_y = int(self.rail_y - self.rod_len_px * math.cos(th))
-        com_x = int(x_c_px + self.bob_com_px * math.sin(th))
-        com_y = int(self.rail_y - self.bob_com_px * math.cos(th))
-
-        # Стрижень (алюмінієвий стержень)
-        pygame.draw.line(self.screen, (200, 215, 235), pivot_px, (end_x, end_y), 4)
-
-        # Вантаж маятника (важкий циліндричний вантаж 106 г)
-        bob_r = max(9, int(13 * self.scene_scale))
-        pygame.draw.circle(self.screen, (230, 140, 40), (com_x, com_y), bob_r)
-        pygame.draw.circle(self.screen, (255, 190, 100), (com_x, com_y), bob_r - 2)
-        pygame.draw.circle(self.screen, (40, 45, 55), (com_x, com_y), 3)
-
-        # Підшипник шарніра (енкодер)
-        pygame.draw.circle(self.screen, (30, 35, 45), pivot_px, 6)
-        pygame.draw.circle(
-            self.screen,
-            (70, 220, 130)
-            if abs(wrap_to_pi(th)) < np.radians(self.cfg.catch_angle_deg)
-            else (200, 210, 225),
-            pivot_px,
-            4,
-        )
-
-        # 6. Телеметрія праворуч
-        deg_th = wrap_to_pi(th) * 180.0 / math.pi
-        telemetry_lines = [
-            f"X: {cart_x * 100.0:+6.2f} см",
-            f"V: {cart_v:+6.2f} м/с",
-            f"θ: {deg_th:+6.1f}°",
-            f"ω: {w_speed:+6.2f} рад/с",
-            f"Сила мотора: {self.sim.dynamics.last_u:+5.2f} Н",
-            f"Прискорення: {self.sim.dynamics.last_a:+5.2f} м/с²",
+        # Телеметрія
+        lines = [
+            f"X:  {tel['x'] * 100:+7.2f} см (справжнє {plant['x'] * 100:+.2f})",
+            f"V:  {tel['v']:+7.3f} м/с",
+            f"a:  {tel['a']:+7.2f} м/с²",
+            f"θ:  {math.degrees(tel['theta']):+7.1f}°  (від низу {math.degrees(tel['phi']):+.1f}°)",
+            f"ω:  {tel['omega']:+7.2f} рад/с",
+            f"Калібровано: {'так' if tel['homed'] else 'НІ'}",
         ]
-        info_x = self.width - 290
-        info_y = 170
-        pygame.draw.rect(
-            self.screen,
-            (20, 26, 38),
-            (info_x - 12, info_y - 8, 280, len(telemetry_lines) * 22 + 14),
-            border_radius=6,
-        )
-        pygame.draw.rect(
-            self.screen,
-            (45, 55, 75),
-            (info_x - 12, info_y - 8, 280, len(telemetry_lines) * 22 + 14),
-            width=1,
-            border_radius=6,
-        )
+        ix, iy = self.width - 330, 165
+        pygame.draw.rect(scr, (20, 26, 38), (ix - 10, iy - 8, 320, len(lines) * 21 + 14), border_radius=6)
+        for i, ln in enumerate(lines):
+            scr.blit(self.font_mono.render(ln, True, (215, 230, 250)), (ix, iy + i * 21))
 
-        for i, line in enumerate(telemetry_lines):
-            t_surf = self.font_mono.render(line, True, (215, 230, 250))
-            self.screen.blit(t_surf, (info_x, info_y + i * 22))
+        # Журнал подій (такі самі повідомлення друкує прошивка)
+        ey = self.panel_y - 6 * 17 - 8
+        for i, ln in enumerate(list(self.sim.events)[-6:]):
+            scr.blit(self.font_small.render(ln, True, (170, 185, 205)), (30, ey + i * 17))
 
-        # 7. Осцилограф
-        self.oscilloscope.draw(self.screen, self.font_small)
-
-        # 8. Кнопки та повзунки
-        for btn in self.buttons:
-            btn.draw(self.screen, self.font_main)
-        for sld in self.sliders:
-            sld.draw(self.screen, self.font_small, self.font_mono)
+        self.osc.draw(scr, self.font_small)
+        for b in self.buttons:
+            b.draw(scr, self.font)
+        for sl in self.sliders:
+            sl.draw(scr, self.font_small, self.font_mono)
 
 
 if __name__ == "__main__":
-    app = SinglePendulumApp()
-    app.run()
+    SinglePendulumApp().run()

@@ -1,18 +1,16 @@
 #pragma once
 
-#include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/// Квадратурний енкодер маятника на PCNT (x4, з накопиченням переповнень).
 void encoder_init(void);
-void encoder_reset(void);
-int encoder_get_raw_count(void);
-int encoder_get_raw_hardware_count(void);
-float encoder_calculate_bottom_angle(int raw_ticks);
-float encoder_calculate_theta(int raw_ticks);
-float encoder_get_theta(void);
+
+/// Сирий накопичений лічильник (нуль/низ веде ядро керування).
+int32_t encoder_get_count(void);
 
 #ifdef __cplusplus
 }

@@ -1,20 +1,16 @@
 """
 sim_pygame.py
 =============
-Точка входу для симуляції одинарного маятника на візку.
-Перенаправляє до повної реалізації у single_pendulum/sim_pygame.py.
+Точка входу симулятора одинарного маятника (цифровий двійник стенду).
+    python sim_pygame.py
 """
 
 import sys
 from pathlib import Path
 
-# Додаємо каталог single_pendulum до шляхів пошуку модулів
-single_pendulum_dir = Path(__file__).resolve().parent / "single_pendulum"
-if str(single_pendulum_dir) not in sys.path:
-    sys.path.insert(0, str(single_pendulum_dir))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "single_pendulum"))
 
-from sim_pygame import RealtimeCartPoleSim
+from main import SinglePendulumApp  # noqa: E402
 
 if __name__ == "__main__":
-    sim = RealtimeCartPoleSim()
-    sim.run()
+    SinglePendulumApp().run()
