@@ -1,0 +1,56 @@
+//
+// !!! WARNING !!! AUTO-GENERATED FILE!
+// PLEASE DO NOT MODIFY IT AND USE "platformio.ini":
+// https://docs.platformio.org/page/projectconf/section_env_build.html#build-flags
+//
+{
+    "configurations": [
+        {
+            "name": "PlatformIO",
+            "includePath": [
+                "/home/timlim/Desktop/Code/ПОК/double-pendulum-stabilization/arduino/pendular/include",
+                "/home/timlim/Desktop/Code/ПОК/double-pendulum-stabilization/arduino/pendular/src",
+                "/home/timlim/.platformio/packages/framework-arduino-avr/cores/arduino",
+                "/home/timlim/.platformio/packages/framework-arduino-avr/variants/mega",
+                "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/EEPROM/src",
+                "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/HID/src",
+                "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/SPI/src",
+                "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/SoftwareSerial/src",
+                "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/Wire/src",
+                ""
+            ],
+            "browse": {
+                "limitSymbolsToIncludedHeaders": true,
+                "path": [
+                    "/home/timlim/Desktop/Code/ПОК/double-pendulum-stabilization/arduino/pendular/include",
+                    "/home/timlim/Desktop/Code/ПОК/double-pendulum-stabilization/arduino/pendular/src",
+                    "/home/timlim/.platformio/packages/framework-arduino-avr/cores/arduino",
+                    "/home/timlim/.platformio/packages/framework-arduino-avr/variants/mega",
+                    "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/EEPROM/src",
+                    "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/HID/src",
+                    "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/SPI/src",
+                    "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/SoftwareSerial/src",
+                    "/home/timlim/.platformio/packages/framework-arduino-avr/libraries/Wire/src",
+                    ""
+                ]
+            },
+            "defines": [
+                "PLATFORMIO=60200",
+                "ARDUINO_AVR_MEGA2560",
+                "F_CPU=16000000L",
+                "ARDUINO_ARCH_AVR",
+                "ARDUINO=10808",
+                "__AVR_ATmega2560__",
+                ""
+            ],
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++11",
+            "compilerPath": "/home/timlim/.platformio/packages/toolchain-atmelavr/bin/avr-gcc",
+            "compilerArgs": [
+                "-mmcu=atmega2560",
+                ""
+            ]
+        }
+    ],
+    "version": 4
+}
