@@ -240,7 +240,7 @@ static void calibration_task(void *pvParameters) {
   double diff = fabs(steps_forward - steps_backward);
   double avg_steps = (steps_forward + steps_backward) / 2.0;
 
-  // Розрахунок ведеться від фактичного вільного ходу RAIL_DISTANCE (58.9 см)
+  // Розрахунок ведеться від фактичного вільного ходу RAIL_DISTANCE (див. cart_pole_config.h)
   double steps_per_cm = avg_steps / (double)RAIL_DISTANCE_CM;
   double steps_per_mm = avg_steps / (double)RAIL_DISTANCE_MM;
   double steps_per_m = avg_steps / (double)RAIL_DISTANCE_M;

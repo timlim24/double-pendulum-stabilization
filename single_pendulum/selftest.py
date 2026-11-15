@@ -78,14 +78,14 @@ def scenario(p_true, verbose=False, sysid=True):
     m["bal_x_rms_mm"] = 1000 * float(np.sqrt(np.mean(np.square(xs[-1500:]))))
     m["bal_th_rms_deg"] = float(np.degrees(np.sqrt(np.mean(np.square(ths[-1500:])))))
 
-    # 3. Поштовх маятника під час балансу (0.8 рад/с ≈ 0.28 м/с на кінці стрижня)
-    b.plant.kick(0.8)
+    # 3. Поштовх маятника під час балансу (1.2 рад/с ≈ 0.4 м/с на кінці стрижня)
+    b.plant.kick(1.2)
     mx = 0.0
     for _ in range(int(4.0 / cl.CTRL_DT)):
         b.step()
         mx = max(mx, abs(b.plant.get()["x"]))
         if b.ctrl.telemetry()["state"] != cl.ST_BALANCING:
-            raise Fail("не втримав поштовх 0.8 рад/с")
+            raise Fail("не втримав поштовх 1.2 рад/с")
     m["max_x_after_kick_mm"] = 1000 * mx
 
     # 4. Скасування балансу [x] -> маятник падає -> гасіння внизу
@@ -132,8 +132,8 @@ def scenario(p_true, verbose=False, sysid=True):
 def variants(p):
     out = [("номінал", p)]
     for name, kw in [
-        ("ω0² −5%", {"omega0_sq": p.omega0_sq * 0.95}),
-        ("ω0² +5%", {"omega0_sq": p.omega0_sq * 1.05}),
+        ("ω0² −10%", {"omega0_sq": p.omega0_sq * 0.90}),
+        ("ω0² +10%", {"omega0_sq": p.omega0_sq * 1.10}),
         ("κ 0.85 (візок недотягує)", {"kappa": 0.85}),
         ("κ 1.15", {"kappa": 1.15}),
         ("τ 12 мс (люфт/пас)", {"tau_act": 0.012}),

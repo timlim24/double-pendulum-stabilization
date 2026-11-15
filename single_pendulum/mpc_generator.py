@@ -46,11 +46,11 @@ NPZ_PATH = HERE / "swingup_trajectory.npz"
 HEADER_PATH = COMMON_DIR / "swingup_trajectory.h"
 
 # Обмеження траєкторії (м'якші за апаратні межі, щоб був запас для зворотного зв'язку)
-T_TOTAL = 5.0
-X_MAX = 0.14
-V_MAX = 0.50
-A_MAX = 3.5
-J_MAX = 50.0
+T_TOTAL = 6.0
+X_MAX = 0.22  # рейка 84.5 см: стопер на ±39.95 см, скасування на ±35 см
+V_MAX = 0.40
+A_MAX = 3.0
+J_MAX = 40.0
 OPT_DT = 0.02
 STORE_DT = 0.01
 
@@ -68,7 +68,8 @@ def pendulum_acc(p: PendulumParams, th, w, a, sin=np.sin, cos=np.cos, tanh=np.ta
     )
 
 
-def optimize(p: PendulumParams, T=T_TOTAL, verbose=True):
+def optimize(p: PendulumParams, T=None, verbose=True):
+    T = T_TOTAL if T is None else T  # не в сигнатурі: інакше фіксується при імпорті
     if ca is None:
         raise RuntimeError("casadi не встановлено: pip install casadi")
     N = int(round(T / OPT_DT))

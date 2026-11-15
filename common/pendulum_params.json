@@ -1,9 +1,9 @@
 {
-  "omega0_sq": 35.04,
-  "kappa": 1.0,
-  "d_visc": 0.092,
-  "c_coul": 0.0,
-  "tau_act": 0.002,
+  "omega0_sq": 34.49775390599794,
+  "kappa": 1.0545216566161422,
+  "d_visc": 0.013884023338186988,
+  "c_coul": 0.00549051099383091,
+  "tau_act": 0.002418692970697806,
   "lqr_q": [
     40.0,
     80.0,
@@ -13,5 +13,21 @@
   ],
   "lqr_r": 0.5,
   "down_zeta": 0.35,
-  "sysid_info": {}
+  "sysid_info": {
+    "date": "2026-11-15T13:53:53",
+    "source": "/home/timlim/Desktop/Code/POC/double-pendulum-stabilization/sysid_data/sysid_20261115_135350.npz",
+    "rms_deg": {
+      "1": 0.059,
+      "2": 0.086,
+      "3": 0.063
+    },
+    "validation_rms_deg": 0.091,
+    "std": {
+      "omega0_sq": 0.000276727827301357,
+      "kappa": 0.00014496382563537302,
+      "d_visc": 7.395661641396693e-05,
+      "c_coul": 0.00017282016477103505,
+      "tau_act": 2.283950253642249e-05
+    }
+  }
 }

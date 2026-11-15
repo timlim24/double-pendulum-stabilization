@@ -1,6 +1,6 @@
 #
 # Automatically generated file. DO NOT EDIT.
-# Espressif IoT Development Framework (ESP-IDF) 6.2.0 Project Configuration
+# Espressif IoT Development Framework (ESP-IDF) 6.1.0 Project Configuration
 #
 # default:
 CONFIG_SOC_CAPS_ECO_VER_MAX=301
@@ -117,7 +117,11 @@ CONFIG_SOC_ADC_DMA_SUPPORTED=y
 # default:
 CONFIG_SOC_ADC_PERIPH_NUM=2
 # default:
+CONFIG_SOC_ADC_MAX_CHANNEL_NUM=10
+# default:
 CONFIG_SOC_ADC_ATTEN_NUM=4
+# default:
+CONFIG_SOC_ADC_DIGI_CONTROLLER_NUM=2
 # default:
 CONFIG_SOC_ADC_PATT_LEN_MAX=16
 # default:
@@ -130,6 +134,14 @@ CONFIG_SOC_ADC_DIGI_RESULT_BYTES=2
 CONFIG_SOC_ADC_DIGI_DATA_BYTES_PER_CONV=4
 # default:
 CONFIG_SOC_ADC_DIGI_MONITOR_NUM=0
+# default:
+CONFIG_SOC_ADC_SAMPLE_FREQ_THRES_HIGH=2000000
+# default:
+CONFIG_SOC_ADC_SAMPLE_FREQ_THRES_LOW=20000
+# default:
+CONFIG_SOC_ADC_RTC_MIN_BITWIDTH=9
+# default:
+CONFIG_SOC_ADC_RTC_MAX_BITWIDTH=12
 # default:
 CONFIG_SOC_ADC_SHARED_POWER=y
 # default:
@@ -466,11 +478,7 @@ CONFIG_BOOTLOADER_PROJECT_VER=1
 # Application Rollback
 #
 # default:
-CONFIG_BOOTLOADER_APP_ROLLBACK=y
-# default:
-CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_ON_STARTUP=y
-# default:
-# CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_BY_APP is not set
+# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set
 # end of Application Rollback
 
 #
@@ -619,8 +627,6 @@ CONFIG_ESP_ROM_HAS_NEWLIB_NANO_FORMAT=y
 # default:
 CONFIG_ESP_ROM_HAS_NEWLIB_32BIT_TIME=y
 # default:
-CONFIG_ESP_ROM_HAS_LIBGCC=y
-# default:
 CONFIG_ESP_ROM_HAS_SW_FLOAT=y
 # default:
 CONFIG_ESP_ROM_USB_OTG_NUM=-1
@@ -755,12 +761,6 @@ CONFIG_COMPILER_HIDE_PATHS_MACROS=y
 # default:
 # CONFIG_COMPILER_CXX_RTTI is not set
 # default:
-CONFIG_COMPILER_CXX_TRIVIAL_AUTO_VAR_INIT_UNINITIALIZED=y
-# default:
-# CONFIG_COMPILER_CXX_TRIVIAL_AUTO_VAR_INIT_PATTERN is not set
-# default:
-# CONFIG_COMPILER_CXX_TRIVIAL_AUTO_VAR_INIT_ZERO is not set
-# default:
 CONFIG_COMPILER_STACK_CHECK_MODE_NONE=y
 # default:
 # CONFIG_COMPILER_STACK_CHECK_MODE_NORM is not set
@@ -788,8 +788,6 @@ CONFIG_COMPILER_STACK_CHECK_MODE_NONE=y
 CONFIG_COMPILER_RT_LIB_GCCLIB=y
 # default:
 CONFIG_COMPILER_RT_LIB_NAME="gcc"
-# default:
-# CONFIG_COMPILER_LTO_LINKTIME is not set
 # default:
 CONFIG_COMPILER_ORPHAN_SECTIONS_ERROR=y
 # default:
@@ -892,8 +890,6 @@ CONFIG_COMPILER_CXX_GLIBCXX_CONSTEXPR_NO_CHANGE=y
 # eFuse Bit Manager
 #
 # default:
-# CONFIG_EFUSE_ENABLE_STAGED_TOKEN_API is not set
-# default:
 # CONFIG_EFUSE_CUSTOM_TABLE is not set
 # default:
 # CONFIG_EFUSE_VIRTUAL is not set
@@ -914,8 +910,6 @@ CONFIG_EFUSE_MAX_BLK_LEN=192
 CONFIG_ESP_TLS_USING_MBEDTLS=y
 # default:
 # CONFIG_ESP_TLS_CUSTOM_STACK is not set
-# default:
-# CONFIG_ESP_TLS_ENABLE_TCP_NODELAY is not set
 # default:
 # CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS is not set
 # default:
@@ -1162,8 +1156,6 @@ CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
 #
 # default:
 # CONFIG_UHCI_ISR_HANDLER_IN_IRAM is not set
-# default:
-# CONFIG_UHCI_RECV_FUNC_IN_IRAM is not set
 # default:
 # CONFIG_UHCI_ISR_CACHE_SAFE is not set
 # default:
@@ -1528,29 +1520,6 @@ CONFIG_LIBC_ASSERT_BUFFER_SIZE=200
 # ESP-MM: Memory Management Configurations
 #
 # end of ESP-MM: Memory Management Configurations
-
-#
-# MSPI Flash configuration
-#
-
-#
-# SPI Flash behavior when brownout
-#
-# default:
-CONFIG_SPI_FLASH_BROWNOUT_RESET_XMC=y
-# default:
-CONFIG_SPI_FLASH_BROWNOUT_RESET=y
-# end of SPI Flash behavior when brownout
-
-#
-# Optional and Experimental MSPI Features (READ DOCS FIRST)
-#
-
-#
-# Features here require specific hardware (READ DOCS FIRST!)
-#
-# end of Optional and Experimental MSPI Features (READ DOCS FIRST)
-# end of MSPI Flash configuration
 
 #
 # ESP NETIF Adapter
@@ -2250,10 +2219,6 @@ CONFIG_FATFS_VFS_FSTAT_BLKSIZE=0
 # default:
 CONFIG_FATFS_LINK_LOCK=y
 # default:
-# CONFIG_FATFS_VFS_RENAME_REPLACES_DESTINATION is not set
-# default:
-# CONFIG_FATFS_VFS_RENAME_REJECTS_SELF_NESTING is not set
-# default:
 CONFIG_FATFS_USE_DYN_BUFFERS=y
 
 #
@@ -2360,8 +2325,6 @@ CONFIG_FREERTOS_SYSTICK_USES_CCOUNT=y
 # CONFIG_FREERTOS_IN_IRAM is not set
 # default:
 # CONFIG_FREERTOS_CHECK_PORT_CRITICAL_COMPLIANCE is not set
-# default:
-# CONFIG_FREERTOS_PORT_THREAD_SAFE_CLAIM is not set
 # end of Port
 
 #
@@ -3146,14 +3109,6 @@ CONFIG_MBEDTLS_HARDWARE_SHA=y
 CONFIG_MBEDTLS_HARDWARE_MPI=y
 # default:
 CONFIG_MBEDTLS_LARGE_KEY_SOFTWARE_MPI=y
-
-#
-# Security hardening
-#
-# default:
-# CONFIG_MBEDTLS_CONSTANT_TIME_PRIME_GEN is not set
-# end of Security hardening
-
 # default:
 CONFIG_MBEDTLS_HARDWARE_AES=y
 # default:
@@ -3267,8 +3222,6 @@ CONFIG_PTHREAD_TASK_NAME_DEFAULT="pthread"
 #
 # default:
 CONFIG_SD_ENABLE_SDIO_SUPPORT=y
-# default:
-CONFIG_SD_READY_POLL_PERIOD_START_US=100
 # end of SD Protocol Layer Configuration
 
 #
@@ -3283,7 +3236,20 @@ CONFIG_MMU_PAGE_SIZE=0x10000
 # end of MMU Config
 
 #
-# Optional and Experimental SPI Flash Features (READ DOCS FIRST)
+# Main Flash configuration
+#
+
+#
+# SPI Flash behavior when brownout
+#
+# default:
+CONFIG_SPI_FLASH_BROWNOUT_RESET_XMC=y
+# default:
+CONFIG_SPI_FLASH_BROWNOUT_RESET=y
+# end of SPI Flash behavior when brownout
+
+#
+# Optional and Experimental Features (READ DOCS FIRST)
 #
 
 #
@@ -3297,7 +3263,8 @@ CONFIG_SPI_FLASH_SUSPEND_TSUS_VAL_US=50
 # CONFIG_SPI_FLASH_FORCE_ENABLE_C6_H2_SUSPEND is not set
 # default:
 CONFIG_SPI_FLASH_PLACE_FUNCTIONS_IN_IRAM=y
-# end of Optional and Experimental SPI Flash Features (READ DOCS FIRST)
+# end of Optional and Experimental Features (READ DOCS FIRST)
+# end of Main Flash configuration
 
 #
 # SPI Flash driver
@@ -3518,7 +3485,6 @@ CONFIG_WL_SECTOR_SIZE=4096
 # CONFIG_ESP32_COMPATIBLE_PRE_V2_1_BOOTLOADERS is not set
 # CONFIG_ESP32_COMPATIBLE_PRE_V3_1_BOOTLOADERS is not set
 # CONFIG_APP_ROLLBACK_ENABLE is not set
-# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set
 # CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_NONE is not set
 # CONFIG_LOG_BOOTLOADER_LEVEL_NONE is not set
 # CONFIG_LOG_BOOTLOADER_LEVEL_ERROR is not set
